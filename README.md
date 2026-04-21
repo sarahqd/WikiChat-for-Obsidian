@@ -1,0 +1,1 @@
+# chatbox-plugin-for-Obsidian
