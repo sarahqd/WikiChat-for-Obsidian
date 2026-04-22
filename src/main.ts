@@ -3,10 +3,11 @@
  * Transforms Obsidian into an AI-driven, self-maintaining knowledge base
  */
 
-import { Plugin, PluginSettingTab, App, Setting, WorkspaceLeaf, TFile, Notice } from 'obsidian';
-import type { LLMWikiSettings } from './types';
-import { DEFAULT_SETTINGS } from './types';
+import { Plugin, PluginSettingTab, App, Setting, WorkspaceLeaf, TFile, Notice, Modal } from 'obsidian';
+import type { LLMWikiSettings, LLMProvider, ModelConfig, ProviderConfig } from './types';
+import { DEFAULT_SETTINGS, DEFAULT_PROVIDERS } from './types';
 import { getOllamaClient } from './ollama/client';
+import { getLLMClient, resetLLMClient } from './llm/client';
 import { ingestFile, ingestContent } from './flows/ingest';
 import { queryWiki } from './flows/query';
 import { lintWiki } from './flows/lint';
@@ -247,34 +248,9 @@ class LLMWikiSettingTab extends PluginSettingTab {
         containerEl.empty();
         containerEl.createEl('h2', { text: 'LLM Wiki Settings' });
 
-        // Ollama Settings
-        containerEl.createEl('h3', { text: 'Ollama Configuration' });
-
-        new Setting(containerEl)
-            .setName('Ollama URL')
-            .setDesc('Ollama API address')
-            .addText((text) =>
-                text
-                    .setPlaceholder('http://localhost:11434')
-                    .setValue(this.plugin.settings.ollamaUrl)
-                    .onChange(async (value) => {
-                        this.plugin.settings.ollamaUrl = value;
-                        await this.plugin.saveSettings();
-                    })
-            );
-
-        new Setting(containerEl)
-            .setName('Model')
-            .setDesc('Ollama model name to use')
-            .addText((text) =>
-                text
-                    .setPlaceholder('llama3.2')
-                    .setValue(this.plugin.settings.model)
-                    .onChange(async (value) => {
-                        this.plugin.settings.model = value;
-                        await this.plugin.saveSettings();
-                    })
-            );
+        // Model Management
+        containerEl.createEl('h3', { text: 'Model Management' });
+        this.renderModelManagement(containerEl);
 
         // Path Settings
         containerEl.createEl('h3', { text: 'Directory Configuration' });
@@ -387,5 +363,382 @@ class LLMWikiSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                     })
             );
+    }
+
+    private renderProviderSettings(containerEl: HTMLElement): void {
+        const provider = this.plugin.settings.provider;
+        const providerConfig = this.plugin.settings.providers.find(p => p.name === provider);
+
+        if (provider === 'Ollama') {
+            new Setting(containerEl)
+                .setName('Ollama URL')
+                .setDesc('Ollama API address')
+                .addText((text) =>
+                    text
+                        .setPlaceholder('http://localhost:11434')
+                        .setValue(providerConfig?.baseUrl || this.plugin.settings.ollamaUrl)
+                        .onChange(async (value) => {
+                            const config = this.getOrCreateProviderConfig('Ollama');
+                            config.baseUrl = value;
+                            this.plugin.settings.ollamaUrl = value; // Legacy compatibility
+                            await this.plugin.saveSettings();
+                        })
+                );
+        } else if (provider === 'OpenAI') {
+            new Setting(containerEl)
+                .setName('OpenAI API Key')
+                .setDesc('Your OpenAI API key')
+                .addText((text) =>
+                    text
+                        .setPlaceholder('sk-...')
+                        .setValue(providerConfig?.apiKey || '')
+                        .onChange(async (value) => {
+                            const config = this.getOrCreateProviderConfig('OpenAI');
+                            config.apiKey = value;
+                            config.enabled = value.length > 0;
+                            await this.plugin.saveSettings();
+                        })
+                );
+
+            new Setting(containerEl)
+                .setName('OpenAI Base URL')
+                .setDesc('Custom API endpoint (optional)')
+                .addText((text) =>
+                    text
+                        .setPlaceholder('https://api.openai.com/v1')
+                        .setValue(providerConfig?.baseUrl || '')
+                        .onChange(async (value) => {
+                            const config = this.getOrCreateProviderConfig('OpenAI');
+                            config.baseUrl = value;
+                            await this.plugin.saveSettings();
+                        })
+                );
+        } else if (provider === 'Anthropic') {
+            new Setting(containerEl)
+                .setName('Anthropic API Key')
+                .setDesc('Your Anthropic API key')
+                .addText((text) =>
+                    text
+                        .setPlaceholder('sk-ant-...')
+                        .setValue(providerConfig?.apiKey || '')
+                        .onChange(async (value) => {
+                            const config = this.getOrCreateProviderConfig('Anthropic');
+                            config.apiKey = value;
+                            config.enabled = value.length > 0;
+                            await this.plugin.saveSettings();
+                        })
+                );
+        } else if (provider === 'DeepSeek') {
+            new Setting(containerEl)
+                .setName('DeepSeek API Key')
+                .setDesc('Your DeepSeek API key')
+                .addText((text) =>
+                    text
+                        .setPlaceholder('sk-...')
+                        .setValue(providerConfig?.apiKey || '')
+                        .onChange(async (value) => {
+                            const config = this.getOrCreateProviderConfig('DeepSeek');
+                            config.apiKey = value;
+                            config.enabled = value.length > 0;
+                            await this.plugin.saveSettings();
+                        })
+                );
+        } else if (provider === 'OpenAI Compatible') {
+            new Setting(containerEl)
+                .setName('API Key')
+                .setDesc('API key for OpenAI compatible provider')
+                .addText((text) =>
+                    text
+                        .setPlaceholder('Enter API key')
+                        .setValue(providerConfig?.apiKey || '')
+                        .onChange(async (value) => {
+                            const config = this.getOrCreateProviderConfig('OpenAI Compatible');
+                            config.apiKey = value;
+                            config.enabled = value.length > 0;
+                            await this.plugin.saveSettings();
+                        })
+                );
+
+            new Setting(containerEl)
+                .setName('Base URL')
+                .setDesc('API endpoint for OpenAI compatible provider')
+                .addText((text) =>
+                    text
+                        .setPlaceholder('https://api.example.com/v1')
+                        .setValue(providerConfig?.baseUrl || '')
+                        .onChange(async (value) => {
+                            const config = this.getOrCreateProviderConfig('OpenAI Compatible');
+                            config.baseUrl = value;
+                            await this.plugin.saveSettings();
+                        })
+                );
+        }
+    }
+
+    private getOrCreateProviderConfig(provider: LLMProvider): ProviderConfig {
+        let config = this.plugin.settings.providers.find(p => p.name === provider);
+        if (!config) {
+            config = {
+                name: provider,
+                displayName: provider,
+                enabled: provider === 'Ollama',
+            };
+            this.plugin.settings.providers.push(config);
+        }
+        return config;
+    }
+
+    private renderModelManagement(containerEl: HTMLElement): void {
+        // Current model selector
+        const currentModelSetting = new Setting(containerEl)
+            .setName('Current Model')
+            .setDesc('Select the current model to use');
+        currentModelSetting.addDropdown((dropdown) => {
+            if (this.plugin.settings.models.length === 0) {
+                dropdown.addOption('', 'No available models');
+                dropdown.setDisabled(true);
+            } else {
+                this.plugin.settings.models.forEach(model => {
+                    dropdown.addOption(model.id, model.name);
+                });
+                dropdown.setValue(this.plugin.settings.currentModelId || '');
+                dropdown.onChange(async (value) => {
+                    const selected = this.plugin.settings.models.find(m => m.id === value);
+                    if (selected) {
+                        this.plugin.settings.currentModelId = selected.id;
+                        this.plugin.settings.model = selected.modelId;
+                    }
+                    await this.plugin.saveSettings();
+                });
+            }
+        });
+
+        // Model list table
+        const modelsContainer = containerEl.createDiv({ cls: 'model-list-container' });
+        
+        // Table header
+        const tableHeader = modelsContainer.createDiv({ cls: 'model-table-header' });
+        tableHeader.createSpan({ text: 'Model Name', cls: 'model-header-name' });
+        tableHeader.createSpan({ text: 'Provider', cls: 'model-header-provider' });
+        tableHeader.createSpan({ text: 'Actions', cls: 'model-header-actions' });
+        
+        // Table body
+        const tableBody = modelsContainer.createDiv({ cls: 'model-table-body' });
+        
+        this.plugin.settings.models.forEach(model => {
+                const modelRow = tableBody.createDiv({ cls: 'model-row' });
+                
+                // Model name cell
+                const nameCell = modelRow.createDiv({ cls: 'model-cell-name' });
+                nameCell.createSpan({ text: model.name, cls: 'model-name' });
+                
+                // Provider cell
+                const providerCell = modelRow.createDiv({ cls: 'model-cell-provider' });
+                providerCell.createSpan({ text: model.provider, cls: 'model-provider' });
+                
+                // Actions cell
+                const actionsCell = modelRow.createDiv({ cls: 'model-cell-actions' });
+                
+                // Edit button (icon)
+                const editBtn = actionsCell.createEl('button', { cls: 'model-icon-btn model-edit-btn', attr: { title: 'Edit' } });
+                editBtn.setText('🖊');
+                editBtn.onClickEvent(() => {
+                    new ModelEditModal(this.app, this.plugin, model, () => this.display()).open();
+                });
+                
+                // Delete button (icon)
+                const deleteBtn = actionsCell.createEl('button', { cls: 'model-icon-btn model-delete-btn', attr: { title: 'Delete' } });
+                deleteBtn.setText('🗑');
+                deleteBtn.onClickEvent(async () => {
+                    // Remove model from list
+                    const index = this.plugin.settings.models.findIndex(m => m.id === model.id);
+                    if (index >= 0) {
+                        this.plugin.settings.models.splice(index, 1);
+                        // Update currentModelId if needed
+                        if (this.plugin.settings.currentModelId === model.id) {
+                            this.plugin.settings.currentModelId = this.plugin.settings.models[0]?.id || '';
+                        }
+                        await this.plugin.saveSettings();
+                        this.display();
+                    }
+                });
+            });
+
+        // Add model button
+        new Setting(containerEl)
+            .setName('Add New Model')
+            .setDesc('Configure a new model')
+            .addButton((button) =>
+                button
+                    .setButtonText('+ Add Model')
+                    .onClick(() => {
+                        new ModelEditModal(this.app, this.plugin, null, () => this.display()).open();
+                    })
+            );
+    }
+}
+
+/**
+ * Model Edit Modal
+ */
+class ModelEditModal extends Modal {
+    private plugin: LLMWikiPlugin;
+    private model: ModelConfig | null;
+    private onSave: () => void;
+    
+    // Form fields
+    private nameInput!: HTMLInputElement;
+    private providerSelect!: HTMLSelectElement;
+    private modelIdInput!: HTMLInputElement;
+    private baseUrlInput!: HTMLInputElement;
+    private apiKeyInput!: HTMLInputElement;
+    private contextLengthInput!: HTMLInputElement;
+    private descriptionInput!: HTMLTextAreaElement;
+    private supportsTools: boolean = true;
+
+    constructor(app: App, plugin: LLMWikiPlugin, model: ModelConfig | null, onSave: () => void) {
+        super(app);
+        this.plugin = plugin;
+        this.model = model;
+        this.onSave = onSave;
+    }
+
+    onOpen(): void {
+        const { contentEl } = this;
+        contentEl.addClass('model-edit-modal');
+
+        contentEl.createEl('h2', { text: this.model ? 'Edit Model' : 'Add New Model' });
+
+        // Name
+        new Setting(contentEl)
+            .setName('Display Name')
+            .setDesc('Name shown in the model selector')
+            .addText((text) => {
+                this.nameInput = text.inputEl;
+                text.setValue(this.model?.name || '');
+            });
+
+        // Provider
+        new Setting(contentEl)
+            .setName('Provider')
+            .setDesc('LLM provider')
+            .addDropdown((dropdown) => {
+                this.providerSelect = dropdown.selectEl;
+                dropdown.addOption('Ollama', 'Ollama');
+                dropdown.addOption('OpenAI', 'OpenAI');
+                dropdown.addOption('Anthropic', 'Anthropic');
+                dropdown.addOption('DeepSeek', 'DeepSeek');
+                dropdown.addOption('OpenAI Compatible', 'OpenAI Compatible');
+                dropdown.setValue(this.model?.provider || 'Ollama');
+            });
+
+        // Model ID
+        new Setting(contentEl)
+            .setName('Model ID')
+            .setDesc('Actual model identifier for API calls')
+            .addText((text) => {
+                this.modelIdInput = text.inputEl;
+                text.setValue(this.model?.modelId || '');
+            });
+
+        // Base URL (optional)
+        new Setting(contentEl)
+            .setName('Base URL')
+            .setDesc('Override provider base URL (optional)')
+            .addText((text) => {
+                this.baseUrlInput = text.inputEl;
+                text.setValue(this.model?.baseUrl || '');
+            });
+
+        // API Key (optional)
+        new Setting(contentEl)
+            .setName('API Key')
+            .setDesc('Override provider API key (optional)')
+            .addText((text) => {
+                this.apiKeyInput = text.inputEl;
+                text.setValue(this.model?.apiKey || '');
+            });
+
+        // Context Length
+        new Setting(contentEl)
+            .setName('Context Length')
+            .setDesc('Maximum context length for this model')
+            .addText((text) => {
+                this.contextLengthInput = text.inputEl;
+                text.setValue(String(this.model?.contextLength || 4096));
+            });
+
+        // Description
+        new Setting(contentEl)
+            .setName('Description')
+            .setDesc('Model description (optional)')
+            .addTextArea((text) => {
+                this.descriptionInput = text.inputEl;
+                text.setValue(this.model?.description || '');
+            });
+
+        // Supports Tools
+        new Setting(contentEl)
+            .setName('Supports Tools')
+            .setDesc('Whether this model supports function calling')
+            .addToggle((toggle) => {
+                toggle.setValue(this.model?.supportsTools ?? true);
+                toggle.onChange((value) => {
+                    this.supportsTools = value;
+                });
+            });
+
+        // Buttons
+        const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
+        
+        buttonContainer.createEl('button', { text: 'Cancel', cls: 'modal-cancel-btn' })
+            .onClickEvent(() => this.close());
+        
+        buttonContainer.createEl('button', { text: 'Save', cls: 'modal-save-btn' })
+            .onClickEvent(() => this.saveModel());
+    }
+
+    private async saveModel(): Promise<void> {
+        const name = this.nameInput.value.trim();
+        const provider = this.providerSelect.value as LLMProvider;
+        const modelId = this.modelIdInput.value.trim();
+
+        if (!name || !modelId) {
+            new Notice('Name and Model ID are required');
+            return;
+        }
+
+        const modelConfig: ModelConfig = {
+            id: this.model?.id || `${provider}-${modelId}-${Date.now()}`,
+            name,
+            provider,
+            modelId,
+            baseUrl: this.baseUrlInput.value.trim() || undefined,
+            apiKey: this.apiKeyInput.value.trim() || undefined,
+            contextLength: parseInt(this.contextLengthInput.value) || 4096,
+            description: this.descriptionInput.value.trim() || undefined,
+            supportsTools: this.supportsTools,
+            isDefault: this.model?.isDefault || false,
+        };
+
+        if (this.model) {
+            // Update existing model
+            const index = this.plugin.settings.models.findIndex(m => m.id === this.model!.id);
+            if (index >= 0) {
+                this.plugin.settings.models[index] = modelConfig;
+            }
+        } else {
+            // Add new model
+            this.plugin.settings.models.push(modelConfig);
+        }
+
+        await this.plugin.saveSettings();
+        this.close();
+        this.onSave();
+    }
+
+    onClose(): void {
+        const { contentEl } = this;
+        contentEl.empty();
     }
 }

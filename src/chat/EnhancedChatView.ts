@@ -1,4 +1,4 @@
-/**
+ /**
  * Enhanced Chat View - Chat Dialog
  * Three-section layout: Header (fixed row) + Display Area (elastic scrollable) + Input Section (fixed bottom 1/5)
  * 
@@ -10,10 +10,10 @@
 
 import { ItemView, WorkspaceLeaf, Notice, TFile } from 'obsidian';
 import './styles.css';
-import type { LLMWikiSettings, ChatMessage, ChatContext, OllamaMessage, OllamaToolCall } from '../types';
+import type { LLMWikiSettings, ChatMessage, ChatContext, OllamaMessage, OllamaToolCall, ModelConfig } from '../types';
 import { ContextManager, getAvailableContextSources } from '../context/ContextManager';
 import { ChatHistoryManager, ChatSaver } from '../history/ChatHistoryManager';
-import { getOllamaClient } from '../ollama/client';
+import { getLLMClient } from '../llm/client';
 import { getOllamaTools, executeTool } from '../tools/index';
 
 const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
@@ -435,8 +435,13 @@ export class EnhancedChatView extends ItemView {
 
     private async loadModels() {
         try {
-            const client = getOllamaClient(this.plugin.settings.ollamaUrl, this.currentModel);
-            this.availableModels = await client.listModels();
+            // Load models from settings
+            this.availableModels = this.plugin.settings.models.map(m => m.name);
+            // Set current model from settings
+            const currentModelConfig = this.plugin.settings.models.find(m => m.id === this.plugin.settings.currentModelId);
+            if (currentModelConfig) {
+                this.currentModel = currentModelConfig.name;
+            }
             this.renderModelDropdown();
         } catch (e) {
             console.error('Failed to load models:', e);
@@ -448,10 +453,18 @@ export class EnhancedChatView extends ItemView {
     }
 
     private async selectModel(model: string) {
+        // Find the model config by name
+        const modelConfig = this.plugin.settings.models.find(m => m.name === model);
+        if (!modelConfig) return;
+        
         this.currentModel = model;
-        this.plugin.settings.model = model;
+        this.plugin.settings.currentModelId = modelConfig.id;
+        this.plugin.settings.model = modelConfig.modelId;
         await this.plugin.saveSettings();
-        getOllamaClient(this.plugin.settings.ollamaUrl, model).setModel(model);
+        
+        // Update LLM client
+        const client = getLLMClient(this.plugin.settings);
+        client.setCurrentModel(modelConfig.id);
         
         if (this.modelLabelEl) {
             this.modelLabelEl.setText(model);
@@ -636,8 +649,8 @@ When you need to use tools, please call the corresponding tool functions.`;
             // Add an empty assistant message for streaming updates
             this.addMessage('assistant', '');
 
-            // Use Ollama client to send request
-            const client = getOllamaClient(this.plugin.settings.ollamaUrl, this.currentModel);
+            // Use unified LLM client to send request
+            const client = getLLMClient(this.plugin.settings);
             
             // Get tool definitions
             const tools = getOllamaTools();
@@ -655,15 +668,15 @@ When you need to use tools, please call the corresponding tool functions.`;
                 
                 try {
                     // Send streaming request (with tools)
-                    const response = await client.chatStream(
+                    const response = await client.chatStream({
                         messages, 
-                        (chunk: string) => {
+                        onChunk: (chunk: string) => {
                             fullResponse += chunk;
                             this.appendToLastMessage(chunk);
-                        }, 
-                        useTools ? tools : undefined, 
+                        },
+                        tools: useTools ? tools : undefined, 
                         systemPrompt
-                    );
+                    });
 
                     // Update last message with full content
                     if (this.messages.length > 0) {
@@ -671,8 +684,8 @@ When you need to use tools, please call the corresponding tool functions.`;
                     }
 
                     // Check if there are tool calls
-                    if (response.toolCalls && response.toolCalls.length > 0) {
-                        toolCalls = response.toolCalls;
+                    if (response.message.toolCalls && response.message.toolCalls.length > 0) {
+                        toolCalls = response.message.toolCalls;
                         
                         // Display tool call information
                         for (const toolCall of toolCalls) {
@@ -754,15 +767,15 @@ When you need to use tools, please call the corresponding tool functions.`;
                         
                         // Retry without tools
                         let retryResponse = '';
-                        await client.chatStream(
+                        await client.chatStream({
                             messages, 
-                            (chunk: string) => {
+                            onChunk: (chunk: string) => {
                                 retryResponse += chunk;
                                 this.appendToLastMessage(chunk);
-                            }, 
-                            undefined, // Without tools
+                            },
+                            tools: undefined, // Without tools
                             systemPrompt
-                        );
+                        });
                         
                         if (this.messages.length > 0) {
                             this.messages[this.messages.length - 1].content = retryResponse;

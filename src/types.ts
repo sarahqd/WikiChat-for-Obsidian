@@ -2,11 +2,45 @@
  * LLM Wiki Plugin - Type Definitions
  */
 
+// ============== Provider Types ==============
+
+export type LLMProvider = 'Ollama' | 'OpenAI' | 'Anthropic' | 'DeepSeek' | 'OpenAI Compatible';
+
+export interface ProviderConfig {
+    name: LLMProvider;
+    displayName: string;
+    apiKey?: string;
+    baseUrl?: string;
+    enabled: boolean;
+}
+
+export interface ModelConfig {
+    id: string;           // Unique identifier
+    name: string;         // Display name
+    provider: LLMProvider;
+    modelId: string;      // Actual model ID for API calls
+    baseUrl?: string;     // Override provider base URL
+    apiKey?: string;      // Override provider API key (for custom models)
+    contextLength?: number;
+    description?: string;
+    isDefault?: boolean;
+    supportsTools?: boolean;
+    supportsVision?: boolean;
+}
+
 // ============== Settings ==============
 
 export interface LLMWikiSettings {
+    // Legacy settings (for backward compatibility)
     ollamaUrl: string;
     model: string;
+    
+    // New provider settings
+    provider: LLMProvider;
+    providers: ProviderConfig[];
+    models: ModelConfig[];
+    currentModelId: string;
+    
     wikiPath: string;
     sourcesPath: string;
     templatesPath: string;
@@ -21,9 +55,29 @@ export interface LLMWikiSettings {
     maxHistoryDisplay: number;     // Max history panel display count
 }
 
+// Default provider configurations
+export const DEFAULT_PROVIDERS: ProviderConfig[] = [
+    { name: 'Ollama', displayName: 'Ollama', baseUrl: 'http://localhost:11434', enabled: true },
+    { name: 'OpenAI', displayName: 'OpenAI', enabled: false },
+    { name: 'Anthropic', displayName: 'Anthropic', enabled: false },
+    { name: 'DeepSeek', displayName: 'DeepSeek', baseUrl: 'https://api.deepseek.com', enabled: false },
+    { name: 'OpenAI Compatible', displayName: 'OpenAI Compatible', enabled: false },
+];
+
+// Default model configurations (empty - user must add models)
+export const DEFAULT_MODELS: ModelConfig[] = [];
+
 export const DEFAULT_SETTINGS: LLMWikiSettings = {
+    // Legacy settings
     ollamaUrl: 'http://localhost:11434',
-    model: 'llama3.2',
+    model: '',
+    
+    // New provider settings
+    provider: 'Ollama',
+    providers: DEFAULT_PROVIDERS,
+    models: DEFAULT_MODELS,
+    currentModelId: '',
+    
     wikiPath: 'Wiki',
     sourcesPath: 'Sources',
     templatesPath: 'Templates',

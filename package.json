@@ -1,6 +1,6 @@
 {
   "name": "llm-wiki-plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Transform Obsidian into an AI-driven, self-maintaining knowledge base (LLM Wiki)",
   "main": "main.js",
   "scripts": {
@@ -16,7 +16,7 @@
     "ai",
     "ollama"
   ],
-  "author": "LLM Wiki Team",
+  "author": "Sarahqd",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.0",
