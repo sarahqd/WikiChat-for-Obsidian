@@ -81,6 +81,7 @@ export class EnhancedChatView extends ItemView {
     private snippetSelectorEl: HTMLElement | null = null;
     private snippetSelector: SnippetSelector | null = null;
     private fileSelectorVisible: boolean = false;
+    private modelUpdateListener: ((event: Event) => void) | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: { settings: LLMWikiSettings; saveSettings: () => Promise<void> }) {
         super(leaf);
@@ -109,11 +110,25 @@ export class EnhancedChatView extends ItemView {
         }
 
         this.loadModels();
+
+        // Refresh model label/list when settings page updates model configuration.
+        this.modelUpdateListener = async () => {
+            await this.loadModels();
+            if (this.modelLabelEl) {
+                this.modelLabelEl.setText(this.currentModel);
+            }
+        };
+        document.addEventListener('wikichat:model-updated', this.modelUpdateListener);
     }
 
     async onClose() {
         if (this.historyManager && this.messages.length > 0) {
             await this.historyManager.saveCurrentSession();
+        }
+
+        if (this.modelUpdateListener) {
+            document.removeEventListener('wikichat:model-updated', this.modelUpdateListener);
+            this.modelUpdateListener = null;
         }
     }
 
@@ -771,10 +786,13 @@ export class EnhancedChatView extends ItemView {
         }
     }
 
-    private toggleModelDropdown() {
+    private async toggleModelDropdown() {
         const isHidden = this.modelDropdownEl?.hasClass('hidden');
         this.closeAllDropdowns();
         if (isHidden) {
+            // Always reload models from settings before opening,
+            // so newly added models in Settings appear immediately.
+            await this.loadModels();
             this.modelDropdownEl?.removeClass('hidden');
             // Dropdown gets focus
             this.modelDropdownEl?.focus();
@@ -840,10 +858,21 @@ export class EnhancedChatView extends ItemView {
         // Set tabindex to make dropdown focusable
         this.modelDropdownEl.setAttribute('tabindex', '-1');
 
+        // Keep focus on the dropdown while interacting (including scrollbar drag)
+        // so blur handler does not close it before users can scroll/select.
+        this.modelDropdownEl.onmousedown = (e) => {
+            e.preventDefault();
+        };
+
+        // Prevent wheel events from bubbling to outer containers.
+        this.modelDropdownEl.onwheel = (e) => {
+            e.stopPropagation();
+        };
+
         // Close on blur
-        this.modelDropdownEl.addEventListener('blur', () => {
+        this.modelDropdownEl.onblur = () => {
             setTimeout(() => this.modelDropdownEl?.addClass('hidden'), 150);
-        });
+        };
 
         if (this.availableModels.length === 0) {
             const item = this.modelDropdownEl.createDiv({ cls: 'dropdown-item' });
@@ -880,12 +909,28 @@ export class EnhancedChatView extends ItemView {
     private async loadModels() {
         try {
             // Load models from settings
-            this.availableModels = this.plugin.settings.models.map(m => m.name);
-            // Set current model from settings
-            const currentModelConfig = this.plugin.settings.models.find(m => m.id === this.plugin.settings.currentModelId);
+            const models = this.plugin.settings.models;
+            this.availableModels = models.map(m => m.name);
+
+            // Set current model from settings; fallback to first model or empty.
+            const currentModelConfig = models.find(m => m.id === this.plugin.settings.currentModelId) || models[0];
             if (currentModelConfig) {
                 this.currentModel = currentModelConfig.name;
+                this.plugin.settings.currentModelId = currentModelConfig.id;
+                this.plugin.settings.model = currentModelConfig.modelId;
+            } else {
+                this.currentModel = '';
+                this.plugin.settings.currentModelId = '';
+                this.plugin.settings.model = '';
             }
+
+            if (this.modelLabelEl) {
+                this.modelLabelEl.setText(this.currentModel);
+            }
+
+            // Keep runtime client in sync with latest settings/model selection.
+            getLLMClient(this.plugin.settings);
+
             // Update token display after loading models
             this.updateTokenDisplay();
             this.renderModelDropdown();

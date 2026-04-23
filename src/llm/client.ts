@@ -125,6 +125,9 @@ export class LLMClient implements LLMProviderInterface {
         } else if (this.settings.models.length > 0) {
             // Fallback to first model or default
             this.currentModel = this.settings.models.find(m => m.isDefault) || this.settings.models[0];
+        } else {
+            // No available models
+            this.currentModel = null;
         }
     }
 

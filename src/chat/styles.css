@@ -520,7 +520,7 @@
     flex-direction: column;
     border: 1px solid var(--background-modifier-border);
     border-radius: 8px;
-    overflow: hidden;
+    overflow: visible;
     transition: border-color 0.2s;
 }
 
@@ -729,6 +729,7 @@
     z-index: 100;
     max-height: 200px;
     overflow-y: auto;
+    overscroll-behavior: contain;
     min-width: 180px;
     outline: none;
 }

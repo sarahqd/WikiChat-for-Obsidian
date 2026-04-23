@@ -552,12 +552,31 @@ class LLMWikiSettingTab extends PluginSettingTab {
                     // Remove model from list
                     const index = this.plugin.settings.models.findIndex(m => m.id === model.id);
                     if (index >= 0) {
+                        const wasCurrentModel = this.plugin.settings.currentModelId === model.id;
                         this.plugin.settings.models.splice(index, 1);
-                        // Update currentModelId if needed
-                        if (this.plugin.settings.currentModelId === model.id) {
-                            this.plugin.settings.currentModelId = this.plugin.settings.models[0]?.id || '';
+
+                        // If selected model is deleted, fallback to first model or empty.
+                        if (wasCurrentModel) {
+                            const fallbackModel = this.plugin.settings.models[0];
+                            this.plugin.settings.currentModelId = fallbackModel?.id || '';
+                            this.plugin.settings.model = fallbackModel?.modelId || '';
+                        } else if (this.plugin.settings.models.length === 0) {
+                            // Keep settings consistent when the last model is removed.
+                            this.plugin.settings.currentModelId = '';
+                            this.plugin.settings.model = '';
                         }
+
                         await this.plugin.saveSettings();
+
+                        // Sync runtime client and notify open chat views to refresh label/list.
+                        getLLMClient(this.plugin.settings);
+                        document.dispatchEvent(new CustomEvent('wikichat:model-updated', {
+                            detail: {
+                                currentModelId: this.plugin.settings.currentModelId,
+                                updatedAt: Date.now(),
+                            },
+                        }));
+
                         this.display();
                     }
                 });
@@ -781,6 +800,12 @@ class ModelEditModal extends Modal {
         }
 
         await this.plugin.saveSettings();
+        document.dispatchEvent(new CustomEvent('wikichat:model-updated', {
+            detail: {
+                currentModelId: this.plugin.settings.currentModelId,
+                updatedAt: Date.now(),
+            },
+        }));
         this.close();
         this.onSave();
     }
