@@ -30,6 +30,19 @@ const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
 
 type DisplayMode = 'chat' | 'history';
 
+// Tool call data structure for rendering
+interface ToolCallDisplay {
+    id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+    result?: {
+        success: boolean;
+        data?: unknown;
+        error?: string;
+    };
+    expanded: boolean;
+}
+
 export class EnhancedChatView extends ItemView {
     private plugin: { settings: LLMWikiSettings; saveSettings: () => Promise<void> };
     private messages: ChatMessage[] = [];
@@ -73,7 +86,7 @@ export class EnhancedChatView extends ItemView {
     }
 
     getViewType(): string { return VIEW_TYPE_CHAT; }
-    getDisplayText(): string { return 'LLM Wiki'; }
+    getDisplayText(): string { return 'WikiChat'; }
     getIcon(): string { return 'bot'; }
 
     async onOpen() {
@@ -89,7 +102,7 @@ export class EnhancedChatView extends ItemView {
         this.render();
 
         if (this.messages.length === 0) {
-            this.addMessage('assistant', 'Hello! I am the LLM Wiki assistant. I can help you:\n\n- **Ingest** new documents into Wiki\n- **Query** the Wiki knowledge base\n- **Maintain** Wiki content\n\nPlease enter your question or command.');
+            this.addMessage('assistant', 'Hello! I am the WikiChat assistant. I can help you:\n\n- **Ingest** new documents into Wiki\n- **Query** the Wiki knowledge base\n- **Maintain** Wiki content\n\nPlease enter your question or command.');
         }
 
         this.loadModels();
@@ -122,13 +135,13 @@ export class EnhancedChatView extends ItemView {
      * - Height: Fixed row, about 40-48px
      * - Position: Fixed at sidebar top
      * - Style: Flat style, no shadow, no border
-     * - Elements: LLM Wiki name (left) | New Chat, Chat History, Save Chat (right)
+     * - Elements: WikiChat name (left) | New Chat, Chat History, Save Chat (right)
      */
     private renderHeader(container: HTMLElement) {
         const header = container.createDiv({ cls: 'chat-header' });
 
         // Left: Title
-        header.createSpan({ text: 'LLM Wiki', cls: 'header-title' });
+        header.createSpan({ text: 'WikiChat', cls: 'header-title' });
 
         // Right: Button group (icon style)
         const btnGroup = header.createDiv({ cls: 'header-btn-group' });
@@ -186,7 +199,17 @@ export class EnhancedChatView extends ItemView {
             // Bubble: Only content, no icons and names displayed
             const bubbleEl = wrapperEl.createDiv({ cls: `message-bubble ${message.role}` });
             const contentEl = bubbleEl.createDiv({ cls: 'message-content' });
-            contentEl.innerHTML = this.renderContent(message.content);
+            
+            // Check if this is an empty assistant message during loading - show loading indicator
+            const isEmptyAssistant = message.role === 'assistant' && !message.content.trim() && this.isLoading;
+            
+            if (isEmptyAssistant) {
+                // Show animated loading indicator
+                contentEl.innerHTML = this.renderLoadingIndicator();
+            } else {
+                // Render message content with collapsible tool calls
+                this.renderMessageContent(contentEl, message.content);
+            }
 
             if (message.context && message.context.length > 0) {
                 const ctxEl = bubbleEl.createDiv({ cls: 'message-context' });
@@ -227,6 +250,204 @@ export class EnhancedChatView extends ItemView {
         });
 
         this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    }
+    
+    /**
+     * Render loading indicator with animated dots
+     */
+    private renderLoadingIndicator(): string {
+        return '<span class="loading-indicator"><span class="loading-dot">.</span><span class="loading-dot">.</span><span class="loading-dot">.</span></span>';
+    }
+    
+    /**
+     * Render message content with collapsible tool call sections
+     */
+    private renderMessageContent(container: HTMLElement, content: string): void {
+        // Parse content to extract tool calls and results
+        const parts = this.parseToolCallContent(content);
+        
+        parts.forEach(part => {
+            if (part.type === 'text') {
+                // Regular text content
+                const textEl = container.createDiv();
+                textEl.innerHTML = this.renderContent(part.content);
+            } else if (part.type === 'tool-call') {
+                // Collapsible tool call section
+                this.renderCollapsibleToolCall(container, part);
+            } else if (part.type === 'tool-result') {
+                // Collapsible tool result section
+                this.renderCollapsibleToolResult(container, part);
+            }
+        });
+    }
+    
+    /**
+     * Parse content to extract tool calls and results
+     */
+    private parseToolCallContent(content: string): Array<{type: string; content: string; toolName?: string; args?: string; success?: boolean; result?: string}> {
+        const parts: Array<{type: string; content: string; toolName?: string; args?: string; success?: boolean; result?: string}> = [];
+        
+        // Pattern for tool call: 🔧 **Calling tool:** `name`\n```json\nargs\n```
+        const toolCallPattern = /🔧 \*\*Calling tool:\*\* `([^`]+)`\n```json\n([\s\S]*?)```/g;
+        // Pattern for tool result: ✅ **Tool executed successfully**\n\n**Result:**\n```json\nresult\n```
+        const toolResultSuccessPattern = /✅ \*\*Tool executed successfully\*\*\n\n\*\*Result:\*\*\n```json\n([\s\S]*?)```/g;
+        // Pattern for tool error: ❌ **Tool execution failed:** error
+        const toolResultErrorPattern = /❌ \*\*Tool execution (?:failed|error):\*\* ([^\n]+)/g;
+        
+        let lastIndex = 0;
+        let match;
+        
+        // Find all tool calls
+        const toolCalls: Array<{start: number; end: number; toolName: string; args: string}> = [];
+        while ((match = toolCallPattern.exec(content)) !== null) {
+            toolCalls.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                toolName: match[1],
+                args: match[2]
+            });
+        }
+        
+        // Find all tool results
+        const toolResults: Array<{start: number; end: number; success: boolean; result: string}> = [];
+        while ((match = toolResultSuccessPattern.exec(content)) !== null) {
+            toolResults.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                success: true,
+                result: match[1]
+            });
+        }
+        while ((match = toolResultErrorPattern.exec(content)) !== null) {
+            toolResults.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                success: false,
+                result: match[1]
+            });
+        }
+        
+        // Combine and sort all special sections
+        const sections: Array<{start: number; end: number; type: string; data: any}> = [
+            ...toolCalls.map(tc => ({start: tc.start, end: tc.end, type: 'tool-call', data: tc})),
+            ...toolResults.map(tr => ({start: tr.start, end: tr.end, type: 'tool-result', data: tr}))
+        ].sort((a, b) => a.start - b.start);
+        
+        // Build parts array
+        for (const section of sections) {
+            // Add text before this section
+            if (section.start > lastIndex) {
+                const textContent = content.substring(lastIndex, section.start).trim();
+                if (textContent) {
+                    parts.push({type: 'text', content: textContent});
+                }
+            }
+            
+            // Add the section
+            if (section.type === 'tool-call') {
+                parts.push({
+                    type: 'tool-call',
+                    content: content.substring(section.start, section.end),
+                    toolName: section.data.toolName,
+                    args: section.data.args
+                });
+            } else if (section.type === 'tool-result') {
+                parts.push({
+                    type: 'tool-result',
+                    content: content.substring(section.start, section.end),
+                    success: section.data.success,
+                    result: section.data.result
+                });
+            }
+            
+            lastIndex = section.end;
+        }
+        
+        // Add remaining text
+        if (lastIndex < content.length) {
+            const textContent = content.substring(lastIndex).trim();
+            if (textContent) {
+                parts.push({type: 'text', content: textContent});
+            }
+        }
+        
+        // If no special sections found, return the whole content as text
+        if (parts.length === 0 && content.trim()) {
+            parts.push({type: 'text', content: content});
+        }
+        
+        return parts;
+    }
+    
+    /**
+     * Render collapsible tool call section
+     */
+    private renderCollapsibleToolCall(container: HTMLElement, part: {toolName?: string; args?: string}): void {
+        const section = container.createDiv({ cls: 'tool-call-section collapsed' });
+        
+        // Header (always visible)
+        const header = section.createDiv({ cls: 'tool-call-header' });
+        header.createSpan({ cls: 'tool-call-icon', text: '🔧' });
+        header.createSpan({ cls: 'tool-call-name', text: part.toolName || 'tool' });
+        header.createSpan({ cls: 'tool-call-toggle', text: '▶' });
+        
+        // Content (collapsible)
+        const content = section.createDiv({ cls: 'tool-call-content' });
+        const argsLabel = content.createDiv({ cls: 'tool-call-label', text: 'Arguments:' });
+        const argsBlock = content.createEl('pre', { cls: 'tool-call-args' });
+        argsBlock.createEl('code', { text: part.args || '{}' });
+        
+        // Toggle click handler
+        header.onClickEvent(() => {
+            const isCollapsed = section.hasClass('collapsed');
+            if (isCollapsed) {
+                section.removeClass('collapsed');
+                section.addClass('expanded');
+                header.querySelector('.tool-call-toggle')?.setText('▼');
+            } else {
+                section.removeClass('expanded');
+                section.addClass('collapsed');
+                header.querySelector('.tool-call-toggle')?.setText('▶');
+            }
+        });
+    }
+    
+    /**
+     * Render collapsible tool result section
+     */
+    private renderCollapsibleToolResult(container: HTMLElement, part: {success?: boolean; result?: string}): void {
+        const section = container.createDiv({ cls: `tool-result-section collapsed ${part.success ? 'success' : 'error'}` });
+        
+        // Header (always visible)
+        const header = section.createDiv({ cls: 'tool-result-header' });
+        header.createSpan({ cls: 'tool-result-icon', text: part.success ? '✅' : '❌' });
+        header.createSpan({ cls: 'tool-result-status', text: part.success ? 'Success' : 'Error' });
+        header.createSpan({ cls: 'tool-result-toggle', text: '▶' });
+        
+        // Content (collapsible)
+        const content = section.createDiv({ cls: 'tool-result-content' });
+        const resultBlock = content.createEl('pre', { cls: 'tool-result-data' });
+        
+        // Truncate long results
+        let displayResult = part.result || '';
+        if (displayResult.length > 1000) {
+            displayResult = displayResult.substring(0, 1000) + '\n... (truncated)';
+        }
+        resultBlock.createEl('code', { text: displayResult });
+        
+        // Toggle click handler
+        header.onClickEvent(() => {
+            const isCollapsed = section.hasClass('collapsed');
+            if (isCollapsed) {
+                section.removeClass('collapsed');
+                section.addClass('expanded');
+                header.querySelector('.tool-result-toggle')?.setText('▼');
+            } else {
+                section.removeClass('expanded');
+                section.addClass('collapsed');
+                header.querySelector('.tool-result-toggle')?.setText('▶');
+            }
+        });
     }
 
     /**
@@ -802,7 +1023,7 @@ export class EnhancedChatView extends ItemView {
 
         try {
             // Build system prompt (including tool descriptions)
-            let systemPrompt = `You are the LLM Wiki assistant, an AI assistant specialized in maintaining and managing knowledge bases. You can help users ingest knowledge, answer queries, and maintain the knowledge base.
+            let systemPrompt = `You are the WikiChat assistant, an AI assistant specialized in maintaining and managing knowledge bases. You can help users ingest knowledge, answer queries, and maintain the knowledge base.
 
 You can use the following tools to complete tasks:
 - read_file: Read file contents from vault

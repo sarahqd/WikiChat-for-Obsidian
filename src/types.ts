@@ -1,5 +1,5 @@
 /**
- * LLM Wiki Plugin - Type Definitions
+ * WikiChat Plugin - Type Definitions
  */
 
 // ============== Provider Types ==============
@@ -179,7 +179,7 @@ export interface WikiPageFrontmatter {
     created: string;
     updated: string;
     tags: string[];
-    related: string[];
+    related: string[];  // Links to original files or related wiki pages (using [[link]] format)
 }
 
 export interface WikiPage {

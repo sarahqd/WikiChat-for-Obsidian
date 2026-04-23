@@ -1,5 +1,5 @@
 /**
- * LLM Wiki Plugin - Main Entry Point
+ * WikiChat Plugin - Main Entry Point
  * Transforms Obsidian into an AI-driven, self-maintaining knowledge base
  */
 
@@ -29,7 +29,7 @@ export default class LLMWikiPlugin extends Plugin {
         this.registerView(VIEW_TYPE_CHAT, (leaf) => new EnhancedChatView(leaf, this));
 
         // Add ribbon icon
-        this.addRibbonIcon('bot', 'LLM Wiki Chat', (evt: MouseEvent) => {
+        this.addRibbonIcon('bot', 'WikiChat Chat', (evt: MouseEvent) => {
             this.activateView();
         });
 
@@ -92,12 +92,12 @@ export default class LLMWikiPlugin extends Plugin {
         // Check Ollama connection
         this.checkOllamaConnection();
 
-        console.log('LLM Wiki Plugin loaded');
+        console.log('WikiChat Plugin loaded');
     }
 
     onunload() {
         this.app.workspace.detachLeavesOfType(VIEW_TYPE_CHAT);
-        console.log('LLM Wiki Plugin unloaded');
+        console.log('WikiChat Plugin unloaded');
     }
 
     async loadSettings() {
@@ -246,7 +246,7 @@ class LLMWikiSettingTab extends PluginSettingTab {
         const { containerEl } = this;
 
         containerEl.empty();
-        containerEl.createEl('h2', { text: 'LLM Wiki Settings' });
+        containerEl.createEl('h2', { text: 'WikiChat Settings' });
 
         // Model Management
         containerEl.createEl('h3', { text: 'Model Management' });
@@ -309,19 +309,30 @@ class LLMWikiSettingTab extends PluginSettingTab {
                     })
             );
 
-        new Setting(containerEl)
+        const contextLengthSetting = new Setting(containerEl)
             .setName('Maximum Context Length')
-            .setDesc('Maximum context token count')
-            .addSlider((slider) =>
-                slider
-                    .setLimits(1000, 32000, 1000)
-                    .setValue(this.plugin.settings.maxContextTokens || 4096)
-                    .setDynamicTooltip()
-                    .onChange(async (value) => {
-                        this.plugin.settings.maxContextTokens = value;
-                        await this.plugin.saveSettings();
-                    })
-            );
+            .setDesc('Maximum context token count (4k - 128k)');
+        
+        // Add a display span for the value in 'k' format
+        const valueDisplay = contextLengthSetting.controlEl.createSpan({ cls: 'context-length-display' });
+        const updateDisplay = (value: number) => {
+            const kValue = Math.round(value / 1024);
+            valueDisplay.textContent = `${kValue}k`;
+        };
+        
+        contextLengthSetting.addSlider((slider) =>
+            slider
+                .setLimits(4096, 131072, 1024)
+                .setValue(this.plugin.settings.maxContextTokens || 8192)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.maxContextTokens = value;
+                    updateDisplay(value);
+                    await this.plugin.saveSettings();
+                })
+        );
+        
+        updateDisplay(this.plugin.settings.maxContextTokens || 8192);
 
         // Automation Settings
         containerEl.createEl('h3', { text: 'Automation Configuration' });
@@ -489,29 +500,17 @@ class LLMWikiSettingTab extends PluginSettingTab {
     }
 
     private renderModelManagement(containerEl: HTMLElement): void {
-        // Current model selector
-        const currentModelSetting = new Setting(containerEl)
-            .setName('Current Model')
-            .setDesc('Select the current model to use');
-        currentModelSetting.addDropdown((dropdown) => {
-            if (this.plugin.settings.models.length === 0) {
-                dropdown.addOption('', 'No available models');
-                dropdown.setDisabled(true);
-            } else {
-                this.plugin.settings.models.forEach(model => {
-                    dropdown.addOption(model.id, model.name);
-                });
-                dropdown.setValue(this.plugin.settings.currentModelId || '');
-                dropdown.onChange(async (value) => {
-                    const selected = this.plugin.settings.models.find(m => m.id === value);
-                    if (selected) {
-                        this.plugin.settings.currentModelId = selected.id;
-                        this.plugin.settings.model = selected.modelId;
-                    }
-                    await this.plugin.saveSettings();
-                });
-            }
-        });
+        // Add model button (moved to top, replacing Current Model dropdown)
+        new Setting(containerEl)
+            .setName('Add New Model')
+            .setDesc('Configure a new model')
+            .addButton((button) =>
+                button
+                    .setButtonText('+ Add Model')
+                    .onClick(() => {
+                        new ModelEditModal(this.app, this.plugin, null, () => this.display()).open();
+                    })
+            );
 
         // Model list table
         const modelsContainer = containerEl.createDiv({ cls: 'model-list-container' });
@@ -564,19 +563,17 @@ class LLMWikiSettingTab extends PluginSettingTab {
                 });
             });
 
-        // Add model button
-        new Setting(containerEl)
-            .setName('Add New Model')
-            .setDesc('Configure a new model')
-            .addButton((button) =>
-                button
-                    .setButtonText('+ Add Model')
-                    .onClick(() => {
-                        new ModelEditModal(this.app, this.plugin, null, () => this.display()).open();
-                    })
-            );
     }
 }
+
+// Provider default URLs
+const PROVIDER_DEFAULTS: Record<LLMProvider, { baseUrl: string; modelIdHint: string }> = {
+    'Ollama': { baseUrl: 'http://localhost:11434', modelIdHint: 'e.g., llama3.2, qwen2.5' },
+    'OpenAI': { baseUrl: 'https://api.openai.com/v1', modelIdHint: 'e.g., gpt-4o, gpt-4o-mini' },
+    'Anthropic': { baseUrl: 'https://api.anthropic.com', modelIdHint: 'e.g., claude-3-5-sonnet-latest' },
+    'DeepSeek': { baseUrl: 'https://api.deepseek.com', modelIdHint: 'e.g., deepseek-chat, deepseek-coder' },
+    'OpenAI Compatible': { baseUrl: 'https://api.example.com/v1', modelIdHint: 'Enter model ID' },
+};
 
 /**
  * Model Edit Modal
@@ -592,9 +589,14 @@ class ModelEditModal extends Modal {
     private modelIdInput!: HTMLInputElement;
     private baseUrlInput!: HTMLInputElement;
     private apiKeyInput!: HTMLInputElement;
-    private contextLengthInput!: HTMLInputElement;
+    private contextLengthValue: number = 4096;
     private descriptionInput!: HTMLTextAreaElement;
     private supportsTools: boolean = true;
+    
+    // Dynamic elements
+    private baseUrlSetting!: Setting;
+    private modelIdSetting!: Setting;
+    private apiKeySetting!: Setting;
 
     constructor(app: App, plugin: LLMWikiPlugin, model: ModelConfig | null, onSave: () => void) {
         super(app);
@@ -623,17 +625,20 @@ class ModelEditModal extends Modal {
             .setName('Provider')
             .setDesc('LLM provider')
             .addDropdown((dropdown) => {
-                this.providerSelect = dropdown.selectEl;
                 dropdown.addOption('Ollama', 'Ollama');
                 dropdown.addOption('OpenAI', 'OpenAI');
                 dropdown.addOption('Anthropic', 'Anthropic');
                 dropdown.addOption('DeepSeek', 'DeepSeek');
                 dropdown.addOption('OpenAI Compatible', 'OpenAI Compatible');
                 dropdown.setValue(this.model?.provider || 'Ollama');
+                dropdown.onChange((value) => {
+                    this.updateProviderDefaults(value as LLMProvider);
+                });
+                this.providerSelect = dropdown.selectEl;
             });
 
         // Model ID
-        new Setting(contentEl)
+        this.modelIdSetting = new Setting(contentEl)
             .setName('Model ID')
             .setDesc('Actual model identifier for API calls')
             .addText((text) => {
@@ -642,7 +647,7 @@ class ModelEditModal extends Modal {
             });
 
         // Base URL (optional)
-        new Setting(contentEl)
+        this.baseUrlSetting = new Setting(contentEl)
             .setName('Base URL')
             .setDesc('Override provider base URL (optional)')
             .addText((text) => {
@@ -651,7 +656,7 @@ class ModelEditModal extends Modal {
             });
 
         // API Key (optional)
-        new Setting(contentEl)
+        this.apiKeySetting = new Setting(contentEl)
             .setName('API Key')
             .setDesc('Override provider API key (optional)')
             .addText((text) => {
@@ -659,14 +664,36 @@ class ModelEditModal extends Modal {
                 text.setValue(this.model?.apiKey || '');
             });
 
-        // Context Length
-        new Setting(contentEl)
+        // Initialize with provider defaults
+        const initialProvider = (this.model?.provider || 'Ollama') as LLMProvider;
+        this.updateProviderDefaults(initialProvider, !this.model);
+
+        // Context Length (with slider like settings interface)
+        this.contextLengthValue = this.model?.contextLength || 4096;
+        
+        const contextLengthSetting = new Setting(contentEl)
             .setName('Context Length')
-            .setDesc('Maximum context length for this model')
-            .addText((text) => {
-                this.contextLengthInput = text.inputEl;
-                text.setValue(String(this.model?.contextLength || 4096));
-            });
+            .setDesc('Maximum context token count (4k - 128k)');
+        
+        // Add a display span for the value in 'k' format
+        const valueDisplay = contextLengthSetting.controlEl.createSpan({ cls: 'context-length-display' });
+        const updateDisplay = (value: number) => {
+            const kValue = Math.round(value / 1024);
+            valueDisplay.textContent = `${kValue}k`;
+        };
+        
+        contextLengthSetting.addSlider((slider) =>
+            slider
+                .setLimits(4096, 131072, 1024)
+                .setValue(this.contextLengthValue)
+                .setDynamicTooltip()
+                .onChange((value) => {
+                    this.contextLengthValue = value;
+                    updateDisplay(value);
+                })
+        );
+        
+        updateDisplay(this.contextLengthValue);
 
         // Description
         new Setting(contentEl)
@@ -697,6 +724,27 @@ class ModelEditModal extends Modal {
         buttonContainer.createEl('button', { text: 'Save', cls: 'modal-save-btn' })
             .onClickEvent(() => this.saveModel());
     }
+    
+    /**
+     * Update placeholder and visibility based on provider
+     */
+    private updateProviderDefaults(provider: LLMProvider, isNewModel: boolean = false): void {
+        const defaults = PROVIDER_DEFAULTS[provider];
+        
+        // Update base URL placeholder
+        this.baseUrlInput.placeholder = defaults.baseUrl;
+        if (isNewModel && !this.baseUrlInput.value) {
+            this.baseUrlInput.value = '';
+        }
+        
+        // Update model ID hint
+        this.modelIdSetting.setDesc(defaults.modelIdHint);
+        
+        // Show/hide API key field based on provider
+        // Ollama doesn't need API key, others do
+        const needsApiKey = provider !== 'Ollama';
+        this.apiKeySetting.settingEl.style.display = needsApiKey ? 'flex' : 'none';
+    }
 
     private async saveModel(): Promise<void> {
         const name = this.nameInput.value.trim();
@@ -715,7 +763,7 @@ class ModelEditModal extends Modal {
             modelId,
             baseUrl: this.baseUrlInput.value.trim() || undefined,
             apiKey: this.apiKeyInput.value.trim() || undefined,
-            contextLength: parseInt(this.contextLengthInput.value) || 4096,
+            contextLength: this.contextLengthValue,
             description: this.descriptionInput.value.trim() || undefined,
             supportsTools: this.supportsTools,
             isDefault: this.model?.isDefault || false,

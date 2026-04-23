@@ -117,7 +117,7 @@ export function getFolderFiles(app: App, folderPath: string): FileItem[] {
     if (folderPath === '/' || folderPath === '') {
         const root = app.vault.getRoot();
         items.push({
-            name: '📁 / (root)',
+            name: '📁 /',
             path: '/',
             type: 'folder',
             isCurrentFolder: true
@@ -465,17 +465,81 @@ export class FileSelector {
     private render(): void {
         this.containerEl.empty();
         
-        // Header with current path
+        // Header with search input
         const header = this.containerEl.createDiv({ cls: 'file-selector-header' });
-        const pathText = this.currentPath || 'Current Folder';
-        header.createSpan({ text: `📂 ${pathText}`, cls: 'file-selector-path' });
         
-        if (this.filterText) {
-            const filterEl = header.createSpan({ cls: 'file-selector-filter' });
-            filterEl.setText(`Search: "${this.filterText}"`);
-        }
+        // Search input
+        const searchInput = header.createEl('input', {
+            attr: {
+                type: 'text',
+                placeholder: 'Search files or browse folder...',
+                value: this.filterText
+            },
+            cls: 'file-selector-search-input'
+        });
+        
+        // Focus search input
+        setTimeout(() => searchInput.focus(), 0);
+        
+        // Handle search input
+        searchInput.addEventListener('input', (e) => {
+            const value = (e.target as HTMLInputElement).value;
+            this.filterText = value;
+            
+            if (value.length > 0) {
+                // Search mode
+                this.items = searchFiles(this.app, value);
+            } else {
+                // Browse mode
+                this.items = getFolderFiles(this.app, this.currentPath);
+            }
+            
+            this.selectedIndex = 0;
+            this.renderList();
+        });
+        
+        // Handle key events in search input
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                this.selectNext();
+                this.renderList();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                this.selectPrevious();
+                this.renderList();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                this.confirmSelection();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                this.hide();
+            }
+        });
+        
+        // Path indicator
+        const pathBar = this.containerEl.createDiv({ cls: 'file-selector-path-bar' });
+        const pathText = this.filterText ? `Search results` : (this.currentPath || 'Current Folder');
+        pathBar.createSpan({ text: `📂 ${pathText}`, cls: 'file-selector-path' });
         
         // File list
+        this.renderList();
+    }
+    
+    /**
+     * Render the file list (separate for re-rendering during search)
+     */
+    private renderList(): void {
+        // Remove existing list if any
+        const existingList = this.containerEl.querySelector('.file-selector-list');
+        if (existingList) {
+            existingList.remove();
+        }
+        const existingFooter = this.containerEl.querySelector('.file-selector-footer');
+        if (existingFooter) {
+            existingFooter.remove();
+        }
+        
         const listEl = this.containerEl.createDiv({ cls: 'file-selector-list' });
         
         if (this.items.length === 0) {

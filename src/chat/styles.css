@@ -1310,3 +1310,173 @@
     border-bottom: 1px solid var(--background-modifier-border);
     color: var(--text-normal);
 }
+
+/* ============================================
+   Loading Indicator Styles
+   ============================================ */
+
+.loading-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 16px;
+    font-weight: bold;
+    color: var(--text-accent);
+}
+
+.loading-indicator .loading-dot {
+    animation: loading-pulse 1.4s infinite ease-in-out;
+}
+
+.loading-indicator .loading-dot:nth-child(1) {
+    animation-delay: 0s;
+}
+
+.loading-indicator .loading-dot:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.loading-indicator .loading-dot:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes loading-pulse {
+    0%, 80%, 100% {
+        opacity: 0.3;
+        transform: scale(0.8);
+    }
+    40% {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+/* ============================================
+   Collapsible Tool Call Styles
+   ============================================ */
+
+.tool-call-section,
+.tool-result-section {
+    margin: 8px 0;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 13px;
+}
+
+.tool-call-header,
+.tool-result-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--background-secondary);
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+}
+
+.tool-call-header:hover,
+.tool-result-header:hover {
+    background: var(--background-modifier-hover);
+}
+
+.tool-call-icon,
+.tool-result-icon {
+    font-size: 14px;
+}
+
+.tool-call-name {
+    flex: 1;
+    font-weight: 500;
+    color: var(--text-normal);
+    font-family: var(--font-monospace);
+}
+
+.tool-result-status {
+    flex: 1;
+    font-weight: 500;
+}
+
+.tool-call-toggle,
+.tool-result-toggle {
+    font-size: 10px;
+    color: var(--text-muted);
+    transition: transform 0.2s;
+}
+
+.tool-call-content,
+.tool-result-content {
+    display: none;
+    padding: 12px;
+    background: var(--background-primary);
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.tool-call-section.expanded .tool-call-content,
+.tool-result-section.expanded .tool-result-content {
+    display: block;
+}
+
+.tool-call-section.expanded .tool-call-toggle,
+.tool-result-section.expanded .tool-result-toggle {
+    transform: rotate(90deg);
+}
+
+.tool-call-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    font-weight: 500;
+}
+
+.tool-call-args,
+.tool-result-data {
+    margin: 0;
+    padding: 10px;
+    background: var(--background-secondary);
+    border-radius: 4px;
+    font-family: var(--font-monospace);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.tool-call-args code,
+.tool-result-data code {
+    font-family: inherit;
+    color: var(--text-normal);
+}
+
+/* Tool result success style */
+.tool-result-section.success {
+    border-color: rgba(var(--color-green-rgb, 46, 160, 67), 0.3);
+}
+
+.tool-result-section.success .tool-result-header {
+    background: rgba(var(--color-green-rgb, 46, 160, 67), 0.1);
+}
+
+.tool-result-section.success .tool-result-status {
+    color: var(--color-green, #2ea043);
+}
+
+/* Tool result error style */
+.tool-result-section.error {
+    border-color: rgba(var(--color-red-rgb, 220, 53, 69), 0.3);
+}
+
+.tool-result-section.error .tool-result-header {
+    background: rgba(var(--color-red-rgb, 220, 53, 69), 0.1);
+}
+
+.tool-result-section.error .tool-result-status {
+    color: var(--text-error);
+}
+
+.tool-result-section.error .tool-result-data {
+    color: var(--text-error);
+}

@@ -7,14 +7,38 @@ import type { ToolDefinition, ToolContext, ToolResult, WikiPageFrontmatter } fro
 import { TFile, normalizePath } from 'obsidian';
 
 /**
+ * Convert a file path to wikilink format [[path/without/md|basename]]
+ */
+function pathToWikilink(path: string): string {
+    // Remove .md extension if present
+    const pathWithoutMd = path.replace(/\.md$/, '');
+    // Get basename for display text
+    const basename = pathWithoutMd.split('/').pop() || pathWithoutMd;
+    return `[[${pathWithoutMd}|${basename}]]`;
+}
+
+/**
  * Generate YAML frontmatter for a Wiki page
  */
 function generateFrontmatter(fm: WikiPageFrontmatter): string {
+    // Format tags as YAML array
+    const tagsYaml = fm.tags.length > 0 
+        ? fm.tags.map(t => `  - ${t}`).join('\n')
+        : '  []';
+    
+    // Format related as YAML array with wikilinks
+    const relatedYaml = fm.related.length > 0
+        ? fm.related.map(r => `  - ${r}`).join('\n')
+        : '  []';
+    
     return `---
 title: ${fm.title}
 created: ${fm.created}
 updated: ${fm.updated}
-tags: [${fm.tags.join(', ')}]
+tags:
+${tagsYaml}
+related:
+${relatedYaml}
 ---`;
 }
 
@@ -33,15 +57,39 @@ function parseFrontmatter(content: string): { frontmatter: WikiPageFrontmatter |
     const titleMatch = fmText.match(/title:\s*(.+)/);
     const createdMatch = fmText.match(/created:\s*(.+)/);
     const updatedMatch = fmText.match(/updated:\s*(.+)/);
-    const tagsMatch = fmText.match(/tags:\s*\[(.+)\]/);
-    const relatedMatch = fmText.match(/related:\s*\[(.+)\]/);
+    
+    // Parse tags - support both array format and inline format
+    let tags: string[] = [];
+    const tagsInlineMatch = fmText.match(/tags:\s*\[(.+)\]/);
+    if (tagsInlineMatch) {
+        tags = tagsInlineMatch[1].split(',').map(t => t.trim()).filter(Boolean);
+    } else {
+        // Match YAML array format: tags:\n  - tag1\n  - tag2
+        const tagsArrayMatch = fmText.match(/tags:\s*\n((?:\s+- .+\n?)+)/);
+        if (tagsArrayMatch) {
+            tags = tagsArrayMatch[1].match(/- (.+)/g)?.map(t => t.replace('- ', '').trim()) || [];
+        }
+    }
+    
+    // Parse related - support both array format and inline format
+    let related: string[] = [];
+    const relatedInlineMatch = fmText.match(/related:\s*\[(.+)\]/);
+    if (relatedInlineMatch) {
+        related = relatedInlineMatch[1].split(',').map(r => r.trim()).filter(Boolean);
+    } else {
+        // Match YAML array format: related:\n  - [[link1]]\n  - [[link2]]
+        const relatedArrayMatch = fmText.match(/related:\s*\n((?:\s+- .+\n?)+)/);
+        if (relatedArrayMatch) {
+            related = relatedArrayMatch[1].match(/- (.+)/g)?.map(r => r.replace('- ', '').trim()) || [];
+        }
+    }
 
     const frontmatter: WikiPageFrontmatter = {
         title: titleMatch?.[1]?.trim() || '',
         created: createdMatch?.[1]?.trim() || '',
         updated: updatedMatch?.[1]?.trim() || '',
-        tags: tagsMatch?.[1]?.split(',').map(t => t.trim()).filter(Boolean) || [],
-        related: relatedMatch?.[1]?.match(/\[\[(.+?)\]\]/g)?.map(r => r.replace(/\[\[|\]\]/g, '')) || [],
+        tags,
+        related,
     };
 
     return { frontmatter, body };
@@ -74,7 +122,11 @@ export const createWikiPageTool: ToolDefinition = {
             },
             related: {
                 type: 'string',
-                description: 'Comma-separated list of related page titles',
+                description: 'Comma-separated list of related wiki pages (e.g., [[path/to/file|file]])',
+            },
+            source_path: {
+                type: 'string',
+                description: 'Path to the original source file (will be linked as [[path|basename]])',
             },
         },
         required: ['title', 'content'],
@@ -86,11 +138,27 @@ export const createWikiPageTool: ToolDefinition = {
         const content = params.content as string;
         const summary = (params.summary as string) || '';
         const tags = (params.tags as string)?.split(',').map(t => t.trim()).filter(Boolean) || [];
-        const related = (params.related as string)?.split(',').map(r => r.trim()).filter(Boolean) || [];
+        const relatedInput = (params.related as string)?.split(',').map(r => r.trim()).filter(Boolean) || [];
+        const sourcePath = params.source_path as string | undefined;
 
         const now = new Date().toISOString().split('T')[0];
         const fileName = title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
         const path = normalizePath(`${settings.wikiPath}/${fileName}.md`);
+
+        // Build related array: include source_path if provided
+        const related: string[] = [...relatedInput];
+        if (sourcePath) {
+            const normalizedSourcePath = normalizePath(sourcePath);
+            const sourceFile = vault.getAbstractFileByPath(normalizedSourcePath);
+            if (sourceFile instanceof TFile) {
+                // Use [[path|basename]] format for related links (remove .md from path)
+                const linkPath = normalizedSourcePath.replace(/\.md$/, '');
+                const sourceLink = `[[${linkPath}|${sourceFile.basename}]]`;
+                if (!related.includes(sourceLink)) {
+                    related.push(sourceLink);
+                }
+            }
+        }
 
         const frontmatter: WikiPageFrontmatter = {
             title,
@@ -105,8 +173,6 @@ export const createWikiPageTool: ToolDefinition = {
 # ${title}
 
 ${summary ? `## Summary\n\n${summary}\n\n` : ''}## Content\n\n${content}
-
-${related.length > 0 ? `## Related Links\n\n${related.map(r => `- [[${r}]]`).join('\n')}` : ''}
 `;
 
         try {
@@ -157,7 +223,11 @@ export const updateWikiPageTool: ToolDefinition = {
             },
             related: {
                 type: 'string',
-                description: 'New comma-separated related pages (optional)',
+                description: 'New comma-separated related links (optional, e.g., [[path/to/file|file]])',
+            },
+            source_path: {
+                type: 'string',
+                description: 'Path to the original source file (will be linked as [[path|basename]])',
             },
         },
         required: ['path'],
@@ -165,6 +235,7 @@ export const updateWikiPageTool: ToolDefinition = {
     handler: async (params, context: ToolContext): Promise<ToolResult> => {
         const vault = context.vault as any;
         const path = normalizePath(params.path as string);
+        const sourcePath = params.source_path as string | undefined;
 
         try {
             const file = vault.getAbstractFileByPath(path);
@@ -196,6 +267,44 @@ export const updateWikiPageTool: ToolDefinition = {
                     newBody = body + '\n\n' + (params.content as string);
                 } else {
                     newBody = params.content as string;
+                }
+            }
+
+            // Add or update source link if source_path is provided
+            let sourceSection = '';
+            if (sourcePath) {
+                const normalizedSourcePath = normalizePath(sourcePath);
+                const sourceFile = vault.getAbstractFileByPath(normalizedSourcePath);
+                if (sourceFile instanceof TFile) {
+                    // Use [[path|basename]] format for source link (remove .md from path)
+                    const linkPath = normalizedSourcePath.replace(/\.md$/, '');
+                    sourceSection = `## Source\n\nOriginal file: [[${linkPath}|${sourceFile.basename}]]\n\n`;
+                    
+                    // Check if body already has a Source section, if so replace it
+                    const sourceSectionRegex = /## Source\n\nOriginal file: \[\[[^\]]+\]\]\n\n/;
+                    if (sourceSectionRegex.test(newBody)) {
+                        newBody = newBody.replace(sourceSectionRegex, sourceSection);
+                        sourceSection = ''; // Already added in replacement
+                    } else if (!newBody.includes('## Source')) {
+                        // Add source section after the title (first # line)
+                        const lines = newBody.split('\n');
+                        let insertIndex = 0;
+                        for (let i = 0; i < lines.length; i++) {
+                            if (lines[i].startsWith('# ')) {
+                                insertIndex = i + 1;
+                                // Skip empty lines after title
+                                while (insertIndex < lines.length && lines[insertIndex].trim() === '') {
+                                    insertIndex++;
+                                }
+                                break;
+                            }
+                        }
+                        if (insertIndex > 0) {
+                            lines.splice(insertIndex, 0, '', sourceSection.trim(), '');
+                            newBody = lines.join('\n');
+                            sourceSection = ''; // Already added
+                        }
+                    }
                 }
             }
 
@@ -259,8 +368,11 @@ export const addBacklinkTool: ToolDefinition = {
             }
 
             // Add to related if not already present
-            if (!sourceFm.related.includes(targetTitle)) {
-                sourceFm.related.push(targetTitle);
+            // Use [[path|basename]] format for related links (remove .md from path)
+            const linkPath = targetPath.replace(/\.md$/, '');
+            const targetLink = `[[${linkPath}|${targetFile.basename}]]`;
+            if (!sourceFm.related.some(r => r.includes(linkPath))) {
+                sourceFm.related.push(targetLink);
             }
 
             const now = new Date().toISOString().split('T')[0];
