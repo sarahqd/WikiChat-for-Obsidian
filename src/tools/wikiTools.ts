@@ -105,6 +105,127 @@ function parseFrontmatter(content: string): { frontmatter: WikiPageFrontmatter |
     return { frontmatter, body };
 }
 
+const wikiPropertyNames = ['title', 'created', 'updated', 'tags', 'related'] as const;
+
+type WikiPropertyName = typeof wikiPropertyNames[number];
+
+interface WikiSectionMatch {
+    headingStart: number;
+    headingEnd: number;
+    bodyStart: number;
+    end: number;
+    level: number;
+    content: string;
+}
+
+function isWikiPropertyName(value: string): value is WikiPropertyName {
+    return wikiPropertyNames.includes(value as WikiPropertyName);
+}
+
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findSection(body: string, heading: string): WikiSectionMatch | null {
+    const headingRegex = new RegExp(`^#{1,6}\\s+${escapeRegExp(heading.trim())}\\s*$`, 'm');
+    const headingMatch = headingRegex.exec(body);
+    if (!headingMatch) {
+        return null;
+    }
+
+    const headingStart = headingMatch.index;
+    const headingLine = headingMatch[0];
+    const level = headingLine.match(/^#+/)?.[0].length || 1;
+    const headingEnd = headingStart + headingLine.length;
+
+    let bodyStart = headingEnd;
+    if (body.slice(bodyStart, bodyStart + 2) === '\r\n') {
+        bodyStart += 2;
+    } else if (body[bodyStart] === '\n') {
+        bodyStart += 1;
+    }
+
+    const remainder = body.slice(bodyStart);
+    const nextHeadingRegex = new RegExp(`^#{1,${level}}\\s+.+$`, 'm');
+    const nextHeadingMatch = nextHeadingRegex.exec(remainder);
+    const end = nextHeadingMatch ? bodyStart + nextHeadingMatch.index : body.length;
+
+    return {
+        headingStart,
+        headingEnd,
+        bodyStart,
+        end,
+        level,
+        content: body.slice(bodyStart, end),
+    };
+}
+
+function normalizeSectionContent(content: string, hasFollowingSection: boolean): string {
+    const normalized = content
+        .replace(/^(?:\r?\n)+/, '')
+        .replace(/(?:\r?\n)+$/, '');
+
+    if (!normalized) {
+        return hasFollowingSection ? '\n' : '';
+    }
+
+    return hasFollowingSection ? `${normalized}\n\n` : `${normalized}\n`;
+}
+
+function replaceSectionContent(body: string, heading: string, newContent: string): string | null {
+    const section = findSection(body, heading);
+    if (!section) {
+        return null;
+    }
+
+    const hasFollowingSection = section.end < body.length;
+    const replacement = normalizeSectionContent(newContent, hasFollowingSection);
+    return body.slice(0, section.bodyStart) + replacement + body.slice(section.end);
+}
+
+async function readWikiPage(
+    vault: any,
+    path: string
+): Promise<{ file: TFile; frontmatter: WikiPageFrontmatter; body: string } | { error: string }> {
+    const file = vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+        return { error: `Wiki page not found: ${path}` };
+    }
+
+    const content = await vault.read(file);
+    const { frontmatter, body } = parseFrontmatter(content);
+
+    if (!frontmatter) {
+        return { error: 'Invalid Wiki page: no frontmatter found' };
+    }
+
+    return { file, frontmatter, body };
+}
+
+async function saveWikiPage(vault: any, file: TFile, frontmatter: WikiPageFrontmatter, body: string): Promise<void> {
+    const fullContent = `${generateFrontmatter(frontmatter)}\n${body}`;
+    await vault.modify(file, fullContent);
+}
+
+function touchUpdated(frontmatter: WikiPageFrontmatter): void {
+    frontmatter.updated = new Date().toISOString().split('T')[0];
+}
+
+function parsePropertyValue(property: WikiPropertyName, value: unknown): string | string[] {
+    if (property === 'tags' || property === 'related') {
+        if (Array.isArray(value)) {
+            return value.map((item) => String(item).trim()).filter(Boolean);
+        }
+
+        return String(value)
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean);
+    }
+
+    return String(value);
+}
+
 /**
  * Create a new Wiki page
  */
@@ -322,6 +443,319 @@ export const updateWikiPageTool: ToolDefinition = {
             await vault.modify(file, fullContent);
 
             return { success: true, data: { path } };
+        } catch (error) {
+            return { success: false, error: String(error) };
+        }
+    },
+};
+
+export const readSummaryTool: ToolDefinition = {
+    name: 'Read_Summary',
+    description: 'Read only the Summary section from a Wiki page',
+    parameters: {
+        type: 'object',
+        properties: {
+            path: {
+                type: 'string',
+                description: 'The path to the Wiki page',
+            },
+        },
+        required: ['path'],
+    },
+    handler: async (params, context: ToolContext): Promise<ToolResult> => {
+        const vault = context.vault as any;
+        const path = normalizePath(params.path as string);
+
+        try {
+            const page = await readWikiPage(vault, path);
+            if ('error' in page) {
+                return { success: false, error: page.error };
+            }
+
+            const section = findSection(page.body, 'Summary');
+            if (!section) {
+                return { success: false, error: 'Summary section not found' };
+            }
+
+            return {
+                success: true,
+                data: {
+                    path,
+                    summary: section.content.trim(),
+                },
+            };
+        } catch (error) {
+            return { success: false, error: String(error) };
+        }
+    },
+};
+
+export const updateSummaryTool: ToolDefinition = {
+    name: 'Update_Summary',
+    description: 'Modify only the Summary section of a Wiki page',
+    parameters: {
+        type: 'object',
+        properties: {
+            path: {
+                type: 'string',
+                description: 'The path to the Wiki page',
+            },
+            summary: {
+                type: 'string',
+                description: 'The new Summary content',
+            },
+        },
+        required: ['path', 'summary'],
+    },
+    handler: async (params, context: ToolContext): Promise<ToolResult> => {
+        const vault = context.vault as any;
+        const path = normalizePath(params.path as string);
+
+        try {
+            const page = await readWikiPage(vault, path);
+            if ('error' in page) {
+                return { success: false, error: page.error };
+            }
+
+            const newBody = replaceSectionContent(page.body, 'Summary', params.summary as string);
+            if (newBody === null) {
+                return { success: false, error: 'Summary section not found' };
+            }
+
+            touchUpdated(page.frontmatter);
+            await saveWikiPage(vault, page.file, page.frontmatter, newBody);
+            return { success: true, data: { path } };
+        } catch (error) {
+            return { success: false, error: String(error) };
+        }
+    },
+};
+
+export const readPropertyTool: ToolDefinition = {
+    name: 'Read_Property',
+    description: 'Read only one frontmatter property from a Wiki page',
+    parameters: {
+        type: 'object',
+        properties: {
+            path: {
+                type: 'string',
+                description: 'The path to the Wiki page',
+            },
+            property: {
+                type: 'string',
+                description: 'Frontmatter property name: title, created, updated, tags, or related',
+                enum: [...wikiPropertyNames],
+            },
+        },
+        required: ['path', 'property'],
+    },
+    handler: async (params, context: ToolContext): Promise<ToolResult> => {
+        const vault = context.vault as any;
+        const path = normalizePath(params.path as string);
+        const property = String(params.property || '');
+
+        if (!isWikiPropertyName(property)) {
+            return { success: false, error: `Unsupported property: ${property}` };
+        }
+
+        try {
+            const page = await readWikiPage(vault, path);
+            if ('error' in page) {
+                return { success: false, error: page.error };
+            }
+
+            return {
+                success: true,
+                data: {
+                    path,
+                    property,
+                    value: page.frontmatter[property],
+                },
+            };
+        } catch (error) {
+            return { success: false, error: String(error) };
+        }
+    },
+};
+
+export const updatePropertyTool: ToolDefinition = {
+    name: 'Update_Property',
+    description: 'Modify only one frontmatter property of a Wiki page',
+    parameters: {
+        type: 'object',
+        properties: {
+            path: {
+                type: 'string',
+                description: 'The path to the Wiki page',
+            },
+            property: {
+                type: 'string',
+                description: 'Frontmatter property name: title, created, updated, tags, or related',
+                enum: [...wikiPropertyNames],
+            },
+            value: {
+                type: 'string',
+                description: 'New property value, or comma-separated values for tags and related',
+            },
+        },
+        required: ['path', 'property', 'value'],
+    },
+    handler: async (params, context: ToolContext): Promise<ToolResult> => {
+        const vault = context.vault as any;
+        const path = normalizePath(params.path as string);
+        const property = String(params.property || '');
+
+        if (!isWikiPropertyName(property)) {
+            return { success: false, error: `Unsupported property: ${property}` };
+        }
+
+        try {
+            const page = await readWikiPage(vault, path);
+            if ('error' in page) {
+                return { success: false, error: page.error };
+            }
+
+            page.frontmatter[property] = parsePropertyValue(property, params.value) as never;
+            if (property !== 'updated') {
+                touchUpdated(page.frontmatter);
+            }
+
+            await saveWikiPage(vault, page.file, page.frontmatter, page.body);
+            return { success: true, data: { path, property } };
+        } catch (error) {
+            return { success: false, error: String(error) };
+        }
+    },
+};
+
+export const updateContentTool: ToolDefinition = {
+    name: 'Update_Content',
+    description: 'Modify only the Content section of a Wiki page',
+    parameters: {
+        type: 'object',
+        properties: {
+            path: {
+                type: 'string',
+                description: 'The path to the Wiki page',
+            },
+            content: {
+                type: 'string',
+                description: 'The new Content section body',
+            },
+        },
+        required: ['path', 'content'],
+    },
+    handler: async (params, context: ToolContext): Promise<ToolResult> => {
+        const vault = context.vault as any;
+        const path = normalizePath(params.path as string);
+
+        try {
+            const page = await readWikiPage(vault, path);
+            if ('error' in page) {
+                return { success: false, error: page.error };
+            }
+
+            const newBody = replaceSectionContent(page.body, 'Content', params.content as string);
+            if (newBody === null) {
+                return { success: false, error: 'Content section not found' };
+            }
+
+            touchUpdated(page.frontmatter);
+            await saveWikiPage(vault, page.file, page.frontmatter, newBody);
+            return { success: true, data: { path } };
+        } catch (error) {
+            return { success: false, error: String(error) };
+        }
+    },
+};
+
+export const readPartTool: ToolDefinition = {
+    name: 'Read_Part',
+    description: 'Read only one named section from a Wiki page by heading title',
+    parameters: {
+        type: 'object',
+        properties: {
+            path: {
+                type: 'string',
+                description: 'The path to the Wiki page',
+            },
+            part: {
+                type: 'string',
+                description: 'Section heading title to read, such as Summary, Content, or Related Links',
+            },
+        },
+        required: ['path', 'part'],
+    },
+    handler: async (params, context: ToolContext): Promise<ToolResult> => {
+        const vault = context.vault as any;
+        const path = normalizePath(params.path as string);
+        const part = String(params.part || '').trim();
+
+        try {
+            const page = await readWikiPage(vault, path);
+            if ('error' in page) {
+                return { success: false, error: page.error };
+            }
+
+            const section = findSection(page.body, part);
+            if (!section) {
+                return { success: false, error: `Section not found: ${part}` };
+            }
+
+            return {
+                success: true,
+                data: {
+                    path,
+                    part,
+                    content: section.content.trim(),
+                },
+            };
+        } catch (error) {
+            return { success: false, error: String(error) };
+        }
+    },
+};
+
+export const updatePartTool: ToolDefinition = {
+    name: 'Update_Part',
+    description: 'Modify only one named section from a Wiki page by heading title',
+    parameters: {
+        type: 'object',
+        properties: {
+            path: {
+                type: 'string',
+                description: 'The path to the Wiki page',
+            },
+            part: {
+                type: 'string',
+                description: 'Section heading title to modify, such as Summary, Content, or Related Links',
+            },
+            content: {
+                type: 'string',
+                description: 'The replacement content for that section',
+            },
+        },
+        required: ['path', 'part', 'content'],
+    },
+    handler: async (params, context: ToolContext): Promise<ToolResult> => {
+        const vault = context.vault as any;
+        const path = normalizePath(params.path as string);
+        const part = String(params.part || '').trim();
+
+        try {
+            const page = await readWikiPage(vault, path);
+            if ('error' in page) {
+                return { success: false, error: page.error };
+            }
+
+            const newBody = replaceSectionContent(page.body, part, params.content as string);
+            if (newBody === null) {
+                return { success: false, error: `Section not found: ${part}` };
+            }
+
+            touchUpdated(page.frontmatter);
+            await saveWikiPage(vault, page.file, page.frontmatter, newBody);
+            return { success: true, data: { path, part } };
         } catch (error) {
             return { success: false, error: String(error) };
         }
@@ -607,6 +1041,13 @@ ${params.message ? `- **Note**: ${params.message}` : ''}
 export const wikiTools: ToolDefinition[] = [
     createWikiPageTool,
     updateWikiPageTool,
+    readSummaryTool,
+    updateSummaryTool,
+    readPropertyTool,
+    updatePropertyTool,
+    updateContentTool,
+    readPartTool,
+    updatePartTool,
     addBacklinkTool,
     updateIndexTool,
     logOperationTool,

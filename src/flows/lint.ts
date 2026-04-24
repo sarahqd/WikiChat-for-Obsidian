@@ -28,6 +28,13 @@ const SYSTEM_PROMPT = `You are a knowledge base maintenance assistant. Your task
 - list_files: List directory files
 - search_files: Search file contents
 - update_wiki_page: Update Wiki page
+- Read_Summary: Read only the Summary section
+- Update_Summary: Modify only the Summary section
+- Read_Property: Read only one frontmatter property
+- Update_Property: Modify only one frontmatter property
+- Update_Content: Modify only the Content section
+- Read_Part: Read only one named section
+- Update_Part: Modify only one named section
 - log_operation: Log operation record`;
 
 /**

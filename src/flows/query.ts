@@ -26,10 +26,17 @@ const SYSTEM_PROMPT = `You are a knowledge base query assistant. Your task is to
 
 ## Workflow
 1. First read the Wiki index (index.md) to understand the knowledge base structure
-2. Locate relevant Wiki pages based on the question
-3. Read the detailed content of relevant pages
-4. Synthesize answers ONLY from the content you have read
-5. Mark citation sources in the answer using [[page-name]] format
+2. Locate candidate Wiki pages based on the question
+3. For each candidate, read frontmatter first (Read_Property), then summary (Read_Summary)
+4. Only when relevance is high, read full content (read_file) or the needed section (Read_Part)
+5. Synthesize answers ONLY from the content you have read
+6. Mark citation sources in the answer using [[page-name]] format
+
+## Retrieval Strategy (MUST FOLLOW)
+- Prioritize cheap reads first: Read_Property -> Read_Summary -> read_file/Read_Part
+- Use read_file only for high-match pages
+- High match means the question intent clearly aligns with title/tags/related and summary keywords
+- If relevance remains low after summary, skip full-text read and continue with other candidates
 
 ## Citation Format
 - Every factual statement must be followed by its source: [[page-name]]
@@ -46,6 +53,9 @@ const SYSTEM_PROMPT = `You are a knowledge base query assistant. Your task is to
 
 ## Available Tools
 - read_file: Read file contents
+- Read_Property: Read only one frontmatter property
+- Read_Summary: Read only the Summary section
+- Read_Part: Read only one named section
 - search_files: Search file contents
 - list_files: List directory files`;
 
@@ -112,7 +122,12 @@ Please first locate relevant pages, then read the content to answer the question
                     );
 
                     // Track which pages were read
-                    if (toolCall.function.name === 'read_file') {
+                    if (
+                        toolCall.function.name === 'read_file' ||
+                        toolCall.function.name === 'Read_Property' ||
+                        toolCall.function.name === 'Read_Summary' ||
+                        toolCall.function.name === 'Read_Part'
+                    ) {
                         const path = toolCall.function.arguments.path as string;
                         if (path.startsWith(settings.wikiPath) && !sources.includes(path)) {
                             sources.push(path);

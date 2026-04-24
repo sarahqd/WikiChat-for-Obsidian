@@ -48,9 +48,22 @@ You can use the following tools to manipulate files and Wiki:
 - search_files: Search file contents
 - create_wiki_page: Create new Wiki page
 - update_wiki_page: Update existing Wiki page
+- Read_Summary: Read only the Summary section
+- Update_Summary: Modify only the Summary section
+- Read_Property: Read only one frontmatter property
+- Update_Property: Modify only one frontmatter property
+- Update_Content: Modify only the Content section
+- Read_Part: Read only one named section
+- Update_Part: Modify only one named section
 - add_backlink: Add bidirectional link
 - update_index: Update Wiki index
 - log_operation: Log operation record
+
+Tool selection rules:
+- Prefer Read_Part when you only need one named section from an existing page.
+- Prefer Update_Content when only the ## Content section should change and Summary or frontmatter must stay intact.
+- Prefer Update_Part when changing one specific heading block other than broad full-page replacement.
+- Use update_wiki_page only for full-body replacement, append operations, or source-link maintenance that affects the page more broadly.
 
 Please call these tools as needed to complete the task.`;
 

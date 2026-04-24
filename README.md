@@ -104,6 +104,30 @@ cp -r WikiChat /path/to/your/vault/.obsidian/plugins/
 | `WikiChat: Lint` | Run maintenance checks |
 | `WikiChat: Open Chat` | Open the AI chat interface |
 
+### Section-Aware Tooling
+
+When the model only needs one part of a Wiki page, prefer the narrowest tool instead of reading or rewriting the full page.
+
+- Use `Read_Summary` when the user asks for the abstract, overview, or short description.
+- Use `Read_Property` when the user asks for frontmatter only, such as `title`, `tags`, `related`, or timestamps.
+- Use `Read_Part` when the user asks for one named section like `Content`, `Related Links`, `Timeline`, or another heading.
+- Use `Update_Content` when the user wants to rewrite only the main body under `## Content` and keep summary, frontmatter, and other sections unchanged.
+- Use `Update_Part` when the user wants to edit one non-Content section by heading name.
+
+Example prompts:
+
+```text
+Read the "Related Links" section of Wiki/Database_Design.md.
+```
+
+Expected tool choice: `Read_Part` with `part: "Related Links"`
+
+```text
+Rewrite only the Content section of Wiki/Python.md using the notes below, but keep the summary and metadata unchanged.
+```
+
+Expected tool choice: `Update_Content`
+
 ## LLM Support
 
 WikiChat supports multiple LLM backends:
