@@ -7,6 +7,9 @@ import { App, TFile, TFolder, TAbstractFile, MarkdownView } from 'obsidian';
 import type { LLMWikiSettings, ChatContext, FileReference } from '../types';
 import { estimateTokens } from './ContextManager';
 
+const MIN_FILE_SEARCH_LENGTH = 2;
+const FILE_SEARCH_DEBOUNCE_MS = 200;
+
 /**
  * File item for display
  */
@@ -188,8 +191,13 @@ export function getFolderFiles(app: App, folderPath: string): FileItem[] {
  * Search files by name
  */
 export function searchFiles(app: App, query: string, maxResults: number = 20): FileItem[] {
+    const trimmedQuery = query.trim();
+    if (trimmedQuery.length < MIN_FILE_SEARCH_LENGTH) {
+        return [];
+    }
+
     const items: FileItem[] = [];
-    const lowerQuery = query.toLowerCase();
+    const lowerQuery = trimmedQuery.toLowerCase();
     
     app.vault.getFiles().forEach(file => {
         if (file.name.toLowerCase().includes(lowerQuery) || 
@@ -354,6 +362,7 @@ export class FileSelector {
     private filterText: string = '';
     private items: FileItem[] = [];
     private selectedIndex: number = 0;
+    private searchDebounceTimer: number | null = null;
 
     constructor(
         app: App,
@@ -386,6 +395,10 @@ export class FileSelector {
      * Hide the file selector
      */
     hide(): void {
+        if (this.searchDebounceTimer !== null) {
+            window.clearTimeout(this.searchDebounceTimer);
+            this.searchDebounceTimer = null;
+        }
         this.containerEl.addClass('hidden');
         this.containerEl.empty();
     }
@@ -403,7 +416,7 @@ export class FileSelector {
     setFilter(text: string): void {
         this.filterText = text;
         
-        if (text.length > 0) {
+        if (text.trim().length >= MIN_FILE_SEARCH_LENGTH) {
             // Search mode
             this.items = searchFiles(this.app, text);
         } else {
@@ -484,18 +497,26 @@ export class FileSelector {
         // Handle search input
         searchInput.addEventListener('input', (e) => {
             const value = (e.target as HTMLInputElement).value;
-            this.filterText = value;
-            
-            if (value.length > 0) {
-                // Search mode
-                this.items = searchFiles(this.app, value);
-            } else {
-                // Browse mode
-                this.items = getFolderFiles(this.app, this.currentPath);
+
+            if (this.searchDebounceTimer !== null) {
+                window.clearTimeout(this.searchDebounceTimer);
             }
-            
-            this.selectedIndex = 0;
-            this.renderList();
+
+            this.searchDebounceTimer = window.setTimeout(() => {
+                this.filterText = value;
+
+                if (value.trim().length >= MIN_FILE_SEARCH_LENGTH) {
+                    // Search mode
+                    this.items = searchFiles(this.app, value);
+                } else {
+                    // Browse mode
+                    this.items = getFolderFiles(this.app, this.currentPath);
+                }
+
+                this.selectedIndex = 0;
+                this.renderList();
+                this.searchDebounceTimer = null;
+            }, FILE_SEARCH_DEBOUNCE_MS);
         });
         
         // Handle key events in search input
@@ -525,7 +546,7 @@ export class FileSelector {
         // File list
         this.renderList();
     }
-    
+
     /**
      * Render the file list (separate for re-rendering during search)
      */

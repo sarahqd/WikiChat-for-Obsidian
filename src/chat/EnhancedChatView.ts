@@ -31,6 +31,9 @@ const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
 
 type DisplayMode = 'chat' | 'history';
 
+const SEARCH_FILES_CALL_BUDGET = 2;
+const SEARCH_FILES_DEFAULT_MAX_RESULTS = 30;
+
 // Tool call data structure for rendering
 interface ToolCallDisplay {
     id: string;
@@ -83,6 +86,8 @@ export class EnhancedChatView extends ItemView {
     private snippetSelector: SnippetSelector | null = null;
     private fileSelectorVisible: boolean = false;
     private modelUpdateListener: ((event: Event) => void) | null = null;
+    private wikiLinkResolutionCache: Map<string, string | null> = new Map();
+    private searchFilesCallCount = 0;
 
     constructor(leaf: WorkspaceLeaf, plugin: { settings: LLMWikiSettings; saveSettings: () => Promise<void> }) {
         super(leaf);
@@ -327,6 +332,26 @@ export class EnhancedChatView extends ItemView {
      * Open a wiki link (file in vault)
      */
     private async openWikiLink(linkText: string): Promise<void> {
+        const normalizedCacheKey = linkText.trim().toLowerCase();
+
+        // Fast path: cache hit
+        if (this.wikiLinkResolutionCache.has(normalizedCacheKey)) {
+            const cachedPath = this.wikiLinkResolutionCache.get(normalizedCacheKey);
+            if (cachedPath) {
+                const cachedFile = this.app.vault.getAbstractFileByPath(cachedPath);
+                if (cachedFile instanceof TFile) {
+                    const leaf = this.app.workspace.getLeaf(false);
+                    await leaf.openFile(cachedFile);
+                    new Notice(`Opened: ${cachedFile.path}`);
+                    return;
+                }
+                this.wikiLinkResolutionCache.delete(normalizedCacheKey);
+            } else {
+                new Notice(`File not found: ${linkText}`);
+                return;
+            }
+        }
+
         // Try to find the file in the vault
         // First try exact match with .md extension
         let filePath = linkText.endsWith('.md') ? linkText : `${linkText}.md`;
@@ -350,10 +375,12 @@ export class EnhancedChatView extends ItemView {
         }
         
         if (file instanceof TFile) {
+            this.wikiLinkResolutionCache.set(normalizedCacheKey, file.path);
             const leaf = this.app.workspace.getLeaf(false);
             await leaf.openFile(file);
             new Notice(`Opened: ${file.path}`);
         } else {
+            this.wikiLinkResolutionCache.set(normalizedCacheKey, null);
             new Notice(`File not found: ${linkText}`);
         }
     }
@@ -1086,6 +1113,7 @@ export class EnhancedChatView extends ItemView {
         }
         this.messages = [];
         this.contexts = [];
+        this.wikiLinkResolutionCache.clear();
         this.historyManager?.createNewSession();
         this.displayMode = 'chat';
         this.renderCurrentView();
@@ -1146,6 +1174,7 @@ export class EnhancedChatView extends ItemView {
 
         this.isLoading = true;
         this.updateSendButton();
+        this.searchFilesCallCount = 0;
         const messageText = text.trim();
         
         // Create abort controller for this request
@@ -1283,9 +1312,32 @@ When you need to use tools, please call the corresponding tool functions.`;
                                     app: this.app,
                                     settings: this.plugin.settings
                                 };
+
+                                const normalizedToolArgs: Record<string, unknown> =
+                                    toolArgs && typeof toolArgs === 'object'
+                                        ? { ...(toolArgs as Record<string, unknown>) }
+                                        : {};
+
+                                if (toolName === 'search_files') {
+                                    this.searchFilesCallCount += 1;
+                                    if (this.searchFilesCallCount > SEARCH_FILES_CALL_BUDGET) {
+                                        const budgetError = `search_files call budget exceeded (${SEARCH_FILES_CALL_BUDGET} per message). Narrow path scope or use Read_Property/Read_Summary first.`;
+                                        this.appendToLastMessage(`\n❌ **Tool execution skipped:** ${budgetError}`);
+                                        toolResults.push({
+                                            role: 'tool',
+                                            content: JSON.stringify({ success: false, error: budgetError }),
+                                            toolCallId: toolCall.id
+                                        });
+                                        continue;
+                                    }
+
+                                    if (normalizedToolArgs.maxResults === undefined) {
+                                        normalizedToolArgs.maxResults = SEARCH_FILES_DEFAULT_MAX_RESULTS;
+                                    }
+                                }
                                 
                                 // Execute tool
-                                const result = await executeTool(toolName, toolArgs, toolContext);
+                                const result = await executeTool(toolName, normalizedToolArgs, toolContext);
                                 
                                 // Display tool result with markdown formatting
                                 if (result.success) {
@@ -1650,14 +1702,21 @@ When you need to use tools, please call the corresponding tool functions.`;
      * Find file path by exact path, md extension fallback, or basename match.
      */
     private findWikiFilePath(linkPath: string): string | null {
+        const cacheKey = linkPath.trim().toLowerCase();
+        if (this.wikiLinkResolutionCache.has(cacheKey)) {
+            return this.wikiLinkResolutionCache.get(cacheKey) || null;
+        }
+
         const direct = this.app.vault.getAbstractFileByPath(linkPath);
         if (direct instanceof TFile) {
+            this.wikiLinkResolutionCache.set(cacheKey, direct.path);
             return direct.path;
         }
 
         if (!linkPath.endsWith('.md')) {
             const withMd = this.app.vault.getAbstractFileByPath(`${linkPath}.md`);
             if (withMd instanceof TFile) {
+                this.wikiLinkResolutionCache.set(cacheKey, withMd.path);
                 return withMd.path;
             }
         }
@@ -1673,7 +1732,9 @@ When you need to use tools, please call the corresponding tool functions.`;
             );
         });
 
-        return matched?.path || null;
+        const resolvedPath = matched?.path || null;
+        this.wikiLinkResolutionCache.set(cacheKey, resolvedPath);
+        return resolvedPath;
     }
 
     /**

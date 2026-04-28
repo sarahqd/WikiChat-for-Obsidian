@@ -223,26 +223,51 @@ export const searchFilesTool: ToolDefinition = {
                 type: 'string',
                 description: 'Limit search to this directory (optional)',
             },
+            maxResults: {
+                type: 'number',
+                description: 'Maximum number of matching files to return (default: 30, max: 200)',
+            },
         },
         required: ['query'],
     },
     handler: async (params, context: ToolContext): Promise<ToolResult> => {
         const vault = context.vault as any;
-        const query = params.query as string;
+        const query = String(params.query ?? '').trim();
         const basePath = params.path ? normalizePath(params.path as string) : '';
+        const rawMaxResults = Number(params.maxResults ?? 30);
+        const maxResults = Number.isFinite(rawMaxResults)
+            ? Math.max(1, Math.min(Math.floor(rawMaxResults), 200))
+            : 30;
+        const maxFileSizeBytes = 1 * 1024 * 1024;
 
         try {
+            if (!query) {
+                return { success: true, data: { results: [] } };
+            }
+
+            let queryRegex: RegExp;
+            try {
+                queryRegex = new RegExp(query, 'gi');
+            } catch (error) {
+                return { success: false, error: `Invalid regex query: ${error}` };
+            }
+
             const results: { path: string; matches: number }[] = [];
             const files = vault.getMarkdownFiles();
 
             for (const file of files) {
                 if (basePath && !file.path.startsWith(basePath)) continue;
+                if (typeof file.stat?.size === 'number' && file.stat.size > maxFileSizeBytes) continue;
 
                 const content = await vault.read(file);
-                const matches = (content.match(new RegExp(query, 'gi')) || []).length;
+                queryRegex.lastIndex = 0;
+                const matches = (content.match(queryRegex) || []).length;
 
                 if (matches > 0) {
                     results.push({ path: file.path, matches });
+                    if (results.length >= maxResults) {
+                        break;
+                    }
                 }
             }
 
