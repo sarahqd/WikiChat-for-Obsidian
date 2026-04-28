@@ -43,11 +43,12 @@ export class ChatHistoryManager {
      * Create new chat session
      */
     createNewSession(): ChatSession {
+        const currentModel = this.settings.models.find((model) => model.id === this.settings.currentModelId);
         const session: ChatSession = {
             id: `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
             title: 'New Chat',
             messages: [],
-            model: this.settings.model,
+            model: currentModel?.modelId || '',
             createdAt: Date.now(),
             updatedAt: Date.now(),
             totalTokens: 0

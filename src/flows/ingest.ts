@@ -5,7 +5,7 @@
 
 import { App, TFile } from 'obsidian';
 import type { LLMWikiSettings, OllamaMessage, ToolContext, IngestResult } from '../types';
-import { getOllamaClient } from '../ollama/client';
+import { getLLMClient } from '../llm/client';
 import { executeTool, getOllamaTools } from '../tools';
 
 const SYSTEM_PROMPT = `You are a knowledge base management assistant. Your task is to integrate new document content into the existing Wiki knowledge base.
@@ -67,52 +67,99 @@ Tool selection rules:
 
 Please call these tools as needed to complete the task.`;
 
-/**
- * Ingest a file into the Wiki
- */
-export async function ingestFile(
+async function readWikiIndex(app: App, settings: LLMWikiSettings): Promise<string> {
+    const indexPath = `${settings.wikiPath}/index.md`;
+    const indexFile = app.vault.getAbstractFileByPath(indexPath);
+    if (indexFile instanceof TFile) {
+        return app.vault.read(indexFile);
+    }
+    return '';
+}
+
+async function runIngestAgentLoop(
+    settings: LLMWikiSettings,
+    context: ToolContext,
+    messages: OllamaMessage[],
+    onProgress?: (message: string) => void
+): Promise<string[]> {
+    const client = getLLMClient(settings);
+    const tools = getOllamaTools();
+    const entities: string[] = [];
+    let response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
+    let iterations = 0;
+    const maxIterations = 10;
+
+    while (iterations < maxIterations) {
+        iterations++;
+
+        if (response.toolCalls && response.toolCalls.length > 0) {
+            for (const toolCall of response.toolCalls) {
+                onProgress?.(`Executing tool: ${toolCall.function.name}`);
+
+                const result = await executeTool(
+                    toolCall.function.name,
+                    toolCall.function.arguments,
+                    context
+                );
+
+                if (toolCall.function.name === 'create_wiki_page') {
+                    const title = toolCall.function.arguments.title as string;
+                    entities.push(title);
+                }
+
+                messages.push({
+                    role: 'assistant',
+                    content: '',
+                    toolCalls: response.toolCalls,
+                });
+                messages.push({
+                    role: 'tool',
+                    content: JSON.stringify(result),
+                    toolCallId: toolCall.id,
+                });
+            }
+
+            response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
+        } else {
+            break;
+        }
+    }
+
+    return entities;
+}
+
+async function ingestFileCore(
     app: App,
     settings: LLMWikiSettings,
     filePath: string,
+    indexContent: string,
     onProgress?: (message: string) => void
 ): Promise<IngestResult> {
-    const client = getOllamaClient(settings.ollamaUrl, settings.model);
     const context: ToolContext = {
         vault: app.vault,
         app,
         settings,
     };
 
-    try {
-        // Step 1: Read the source file
-        onProgress?.(`Reading file: ${filePath}`);
-        const file = app.vault.getAbstractFileByPath(filePath);
-        if (!(file instanceof TFile)) {
-            return {
-                success: false,
-                sourcePath: filePath,
-                operation: 'skip',
-                entities: [],
-                message: 'File does not exist',
-            };
-        }
+    onProgress?.(`Reading file: ${filePath}`);
+    const file = app.vault.getAbstractFileByPath(filePath);
+    if (!(file instanceof TFile)) {
+        return {
+            success: false,
+            sourcePath: filePath,
+            operation: 'skip',
+            entities: [],
+            message: 'File does not exist',
+        };
+    }
 
-        const content = await app.vault.read(file);
+    const content = await app.vault.read(file);
+    onProgress?.('Analyzing document content...');
 
-        // Step 2: Read Wiki index for context
-        let indexContent = '';
-        const indexPath = `${settings.wikiPath}/index.md`;
-        const indexFile = app.vault.getAbstractFileByPath(indexPath);
-        if (indexFile instanceof TFile) {
-            indexContent = await app.vault.read(indexFile);
-        }
-
-        // Step 3: Ask LLM to process the document
-        onProgress?.('Analyzing document content...');
-        const messages: OllamaMessage[] = [
-            {
-                role: 'user',
-                content: `Please integrate the following document content into the Wiki.
+    const messages: OllamaMessage[] = [
+        {
+            role: 'user',
+            content: `Please integrate the following document content into the Wiki.
 
 ## Source File Path
 ${filePath}
@@ -128,82 +175,58 @@ ${indexContent || '(Wiki is empty)'}
 \`\`\`
 
 Please analyze the document, extract key entities and concepts, and create or update corresponding Wiki pages.`,
-            },
-        ];
+        },
+    ];
 
-        // Step 4: Run agentic loop with tool calling
-        const tools = getOllamaTools();
-        let response = await client.chat(messages, tools, SYSTEM_PROMPT);
-        let iterations = 0;
-        const maxIterations = 10;
-        const entities: string[] = [];
+    const entities = await runIngestAgentLoop(settings, context, messages, onProgress);
 
-        while (iterations < maxIterations) {
-            iterations++;
+    return {
+        success: true,
+        sourcePath: filePath,
+        operation: entities.length > 0 ? 'create' : 'update',
+        entities,
+        message: `Successfully ingested document, extracted ${entities.length} entities`,
+    };
+}
 
-            if (response.toolCalls && response.toolCalls.length > 0) {
-                // Process tool calls
-                for (const toolCall of response.toolCalls) {
-                    onProgress?.(`Executing tool: ${toolCall.function.name}`);
-                    
-                    const result = await executeTool(
-                        toolCall.function.name,
-                        toolCall.function.arguments,
-                        context
-                    );
+/**
+ * Ingest a file into the Wiki
+ */
+export async function ingestFile(
+    app: App,
+    settings: LLMWikiSettings,
+    filePath: string,
+    onProgress?: (message: string) => void
+): Promise<IngestResult> {
+    const context: ToolContext = {
+        vault: app.vault,
+        app,
+        settings,
+    };
 
-                    // Extract entities from tool calls
-                    if (toolCall.function.name === 'create_wiki_page') {
-                        const title = toolCall.function.arguments.title as string;
-                        entities.push(title);
-                    }
+    try {
+        const indexContent = await readWikiIndex(app, settings);
+        const ingestResult = await ingestFileCore(app, settings, filePath, indexContent, onProgress);
 
-                    // Add tool result to messages
-                    messages.push({
-                        role: 'assistant',
-                        content: '',
-                        toolCalls: response.toolCalls,
-                    });
-                    messages.push({
-                        role: 'tool',
-                        content: JSON.stringify(result),
-                        toolCallId: toolCall.id,
-                    });
-                }
-
-                // Get next response
-                response = await client.chat(messages, tools, SYSTEM_PROMPT);
-            } else {
-                // No tool calls, we're done
-                break;
-            }
-        }
-
-        // Step 5: Update the Wiki index
+        // Step 3: Update the Wiki index
         onProgress?.('Updating Wiki index...');
         await executeTool('update_index', {}, context);
 
-        // Step 6: Log the operation
+        // Step 4: Log the operation
         await executeTool(
             'log_operation',
             {
                 type: 'ingest',
                 source: filePath,
                 operation: 'Document ingestion',
-                entities: entities.join(','),
-                status: 'success',
-                message: `Successfully ingested document, created ${entities.length} pages`,
+                entities: ingestResult.entities.join(','),
+                status: ingestResult.success ? 'success' : 'failed',
+                message: ingestResult.message,
             },
             context
         );
 
-        return {
-            success: true,
-            sourcePath: filePath,
-            operation: entities.length > 0 ? 'create' : 'update',
-            entities,
-            message: `Successfully ingested document, extracted ${entities.length} entities`,
-        };
+        return ingestResult;
     } catch (error) {
         return {
             success: false,
@@ -216,6 +239,60 @@ Please analyze the document, extract key entities and concepts, and create or up
 }
 
 /**
+ * Batch ingest files into the Wiki with shared index loading.
+ */
+export async function ingestFiles(
+    app: App,
+    settings: LLMWikiSettings,
+    filePaths: string[],
+    onProgress?: (message: string, index: number, total: number) => void
+): Promise<IngestResult[]> {
+    if (filePaths.length === 0) {
+        return [];
+    }
+
+    const context: ToolContext = {
+        vault: app.vault,
+        app,
+        settings,
+    };
+
+    const indexContent = await readWikiIndex(app, settings);
+    const total = filePaths.length;
+    const results: IngestResult[] = [];
+    const allEntities: string[] = [];
+
+    for (let i = 0; i < filePaths.length; i++) {
+        const currentPath = filePaths[i];
+        onProgress?.(`Ingesting file ${i + 1}/${total}: ${currentPath}`, i, total);
+
+        const result = await ingestFileCore(app, settings, currentPath, indexContent, (message) => {
+            onProgress?.(message, i, total);
+        });
+
+        results.push(result);
+        allEntities.push(...result.entities);
+    }
+
+    onProgress?.('Updating Wiki index (batch)...', total, total);
+    await executeTool('update_index', {}, context);
+
+    await executeTool(
+        'log_operation',
+        {
+            type: 'ingest',
+            operation: 'Batch document ingestion',
+            entities: allEntities.join(','),
+            status: 'success',
+            message: `Successfully ingested ${total} files, extracted ${allEntities.length} entities`,
+        },
+        context
+    );
+
+    return results;
+}
+
+/**
  * Ingest raw content into the Wiki
  */
 export async function ingestContent(
@@ -225,7 +302,6 @@ export async function ingestContent(
     title?: string,
     onProgress?: (message: string) => void
 ): Promise<IngestResult> {
-    const client = getOllamaClient(settings.ollamaUrl, settings.model);
     const context: ToolContext = {
         vault: app.vault,
         app,
@@ -233,13 +309,7 @@ export async function ingestContent(
     };
 
     try {
-        // Read Wiki index for context
-        let indexContent = '';
-        const indexPath = `${settings.wikiPath}/index.md`;
-        const indexFile = app.vault.getAbstractFileByPath(indexPath);
-        if (indexFile instanceof TFile) {
-            indexContent = await app.vault.read(indexFile);
-        }
+        const indexContent = await readWikiIndex(app, settings);
 
         onProgress?.('Analyzing content...');
         const messages: OllamaMessage[] = [
@@ -261,47 +331,7 @@ Please analyze the content, extract key entities and concepts, and create or upd
             },
         ];
 
-        const tools = getOllamaTools();
-        let response = await client.chat(messages, tools, SYSTEM_PROMPT);
-        let iterations = 0;
-        const maxIterations = 10;
-        const entities: string[] = [];
-
-        while (iterations < maxIterations) {
-            iterations++;
-
-            if (response.toolCalls && response.toolCalls.length > 0) {
-                for (const toolCall of response.toolCalls) {
-                    onProgress?.(`Executing tool: ${toolCall.function.name}`);
-                    
-                    const result = await executeTool(
-                        toolCall.function.name,
-                        toolCall.function.arguments,
-                        context
-                    );
-
-                    if (toolCall.function.name === 'create_wiki_page') {
-                        const pageTitle = toolCall.function.arguments.title as string;
-                        entities.push(pageTitle);
-                    }
-
-                    messages.push({
-                        role: 'assistant',
-                        content: '',
-                        toolCalls: response.toolCalls,
-                    });
-                    messages.push({
-                        role: 'tool',
-                        content: JSON.stringify(result),
-                        toolCallId: toolCall.id,
-                    });
-                }
-
-                response = await client.chat(messages, tools, SYSTEM_PROMPT);
-            } else {
-                break;
-            }
-        }
+        const entities = await runIngestAgentLoop(settings, context, messages, onProgress);
 
         await executeTool('update_index', {}, context);
 

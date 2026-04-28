@@ -24,6 +24,20 @@ export class OpenAIProvider implements LLMProviderInterface {
         this.model = config.model || this.model;
     }
 
+    private getHeaders(contentType: boolean = true): Record<string, string> {
+        const headers: Record<string, string> = {};
+
+        if (contentType) {
+            headers['Content-Type'] = 'application/json';
+        }
+
+        if (this.apiKey) {
+            headers['Authorization'] = `Bearer ${this.apiKey}`;
+        }
+
+        return headers;
+    }
+
     private formatMessages(messages: OllamaMessage[], systemPrompt?: string): Array<{
         role: 'system' | 'user' | 'assistant' | 'tool';
         content: string;
@@ -125,10 +139,7 @@ export class OpenAIProvider implements LLMProviderInterface {
 
         const response = await fetch(`${this.baseUrl}/chat/completions`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.apiKey}`,
-            },
+            headers: this.getHeaders(),
             body: JSON.stringify(body),
         });
 
@@ -193,10 +204,7 @@ export class OpenAIProvider implements LLMProviderInterface {
 
         const response = await fetch(`${this.baseUrl}/chat/completions`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.apiKey}`,
-            },
+            headers: this.getHeaders(),
             body: JSON.stringify(body),
             signal,  // Pass abort signal
         });
@@ -295,10 +303,7 @@ export class OpenAIProvider implements LLMProviderInterface {
     async embed(text: string): Promise<number[]> {
         const response = await fetch(`${this.baseUrl}/embeddings`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${this.apiKey}`,
-            },
+            headers: this.getHeaders(),
             body: JSON.stringify({
                 model: 'text-embedding-3-small',
                 input: text,
@@ -315,9 +320,7 @@ export class OpenAIProvider implements LLMProviderInterface {
 
     async listModels(): Promise<string[]> {
         const response = await fetch(`${this.baseUrl}/models`, {
-            headers: {
-                'Authorization': `Bearer ${this.apiKey}`,
-            },
+            headers: this.getHeaders(false),
         });
 
         if (!response.ok) {
@@ -332,11 +335,15 @@ export class OpenAIProvider implements LLMProviderInterface {
 
     async healthCheck(): Promise<boolean> {
         try {
-            if (!this.apiKey) return false;
-            const response = await fetch(`${this.baseUrl}/models`, {
-                headers: {
-                    'Authorization': `Bearer ${this.apiKey}`,
-                },
+            const response = await fetch(`${this.baseUrl}/chat/completions`, {
+                method: 'POST',
+                headers: this.getHeaders(),
+                body: JSON.stringify({
+                    model: this.model,
+                    messages: [{ role: 'user', content: 'ping' }],
+                    max_tokens: 1,
+                    temperature: 0,
+                }),
             });
             return response.ok;
         } catch {

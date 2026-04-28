@@ -4,7 +4,160 @@
 
 // ============== Provider Types ==============
 
-export type LLMProvider = 'Ollama' | 'OpenAI' | 'Anthropic' | 'DeepSeek' | 'OpenAI Compatible';
+export type LLMProvider = string;
+
+export type LLMProviderApiStyle = 'ollama' | 'openai' | 'anthropic';
+export type LLMProviderHosting = 'local' | 'cloud' | 'hybrid';
+export type LLMProviderAuthMode = 'none' | 'optional' | 'required';
+
+export interface LLMProviderMetadata {
+    id: LLMProvider;
+    displayName: string;
+    apiStyle: LLMProviderApiStyle;
+    hosting: LLMProviderHosting;
+    authMode: LLMProviderAuthMode;
+    defaultBaseUrl: string;
+    defaultModelId: string;
+    modelIdHint: string;
+    baseUrlLabel?: string;
+    baseUrlDescription?: string;
+    apiKeyLabel?: string;
+    apiKeyDescription?: string;
+    enabledByDefault?: boolean;
+}
+
+export const PROVIDER_CATALOG: LLMProviderMetadata[] = [
+    {
+        id: 'Ollama',
+        displayName: 'Ollama',
+        apiStyle: 'ollama',
+        hosting: 'local',
+        authMode: 'none',
+        defaultBaseUrl: 'http://localhost:11434',
+        defaultModelId: 'llama3.2',
+        modelIdHint: 'e.g., llama3.2, qwen2.5',
+        baseUrlLabel: 'Ollama URL',
+        baseUrlDescription: 'Default Ollama API address',
+        enabledByDefault: true,
+    },
+    {
+        id: 'LM Studio',
+        displayName: 'LM Studio',
+        apiStyle: 'openai',
+        hosting: 'local',
+        authMode: 'none',
+        defaultBaseUrl: 'http://127.0.0.1:1234/v1',
+        defaultModelId: 'local-model',
+        modelIdHint: 'e.g., local-model, qwen2.5-7b-instruct',
+        baseUrlDescription: 'Local OpenAI-compatible endpoint exposed by LM Studio',
+    },
+    {
+        id: 'vLLM',
+        displayName: 'vLLM',
+        apiStyle: 'openai',
+        hosting: 'local',
+        authMode: 'optional',
+        defaultBaseUrl: 'http://localhost:8000/v1',
+        defaultModelId: 'hosted-model',
+        modelIdHint: 'e.g., hosted-model, meta-llama/Llama-3.1-8B-Instruct',
+        baseUrlDescription: 'OpenAI-compatible endpoint exposed by vLLM',
+        apiKeyDescription: 'Optional if your vLLM gateway requires authentication',
+    },
+    {
+        id: 'LocalAI',
+        displayName: 'LocalAI',
+        apiStyle: 'openai',
+        hosting: 'local',
+        authMode: 'optional',
+        defaultBaseUrl: 'http://localhost:8080/v1',
+        defaultModelId: 'local-model',
+        modelIdHint: 'e.g., local-model, mistral, phi-4',
+        baseUrlDescription: 'OpenAI-compatible endpoint exposed by LocalAI',
+        apiKeyDescription: 'Optional if your LocalAI gateway requires authentication',
+    },
+    {
+        id: 'OpenAI',
+        displayName: 'OpenAI',
+        apiStyle: 'openai',
+        hosting: 'cloud',
+        authMode: 'required',
+        defaultBaseUrl: 'https://api.openai.com/v1',
+        defaultModelId: 'gpt-4o-mini',
+        modelIdHint: 'e.g., gpt-4o, gpt-4o-mini',
+        apiKeyDescription: 'API key used for OpenAI requests',
+    },
+    {
+        id: 'OpenRouter',
+        displayName: 'OpenRouter',
+        apiStyle: 'openai',
+        hosting: 'cloud',
+        authMode: 'required',
+        defaultBaseUrl: 'https://openrouter.ai/api/v1',
+        defaultModelId: 'openai/gpt-4o-mini',
+        modelIdHint: 'e.g., openai/gpt-4o-mini, anthropic/claude-3.5-sonnet',
+        apiKeyDescription: 'API key used for OpenRouter requests',
+    },
+    {
+        id: 'Groq',
+        displayName: 'Groq',
+        apiStyle: 'openai',
+        hosting: 'cloud',
+        authMode: 'required',
+        defaultBaseUrl: 'https://api.groq.com/openai/v1',
+        defaultModelId: 'llama-3.3-70b-versatile',
+        modelIdHint: 'e.g., llama-3.3-70b-versatile, mixtral-8x7b-32768',
+        apiKeyDescription: 'API key used for Groq requests',
+    },
+    {
+        id: 'DeepSeek',
+        displayName: 'DeepSeek',
+        apiStyle: 'openai',
+        hosting: 'cloud',
+        authMode: 'required',
+        defaultBaseUrl: 'https://api.deepseek.com/v1',
+        defaultModelId: 'deepseek-chat',
+        modelIdHint: 'e.g., deepseek-chat, deepseek-reasoner',
+        apiKeyDescription: 'API key used for DeepSeek requests',
+    },
+    {
+        id: 'Anthropic',
+        displayName: 'Anthropic',
+        apiStyle: 'anthropic',
+        hosting: 'cloud',
+        authMode: 'required',
+        defaultBaseUrl: 'https://api.anthropic.com/v1',
+        defaultModelId: 'claude-3-5-sonnet-latest',
+        modelIdHint: 'e.g., claude-3-5-sonnet-latest',
+        apiKeyDescription: 'API key used for Anthropic requests',
+    },
+    {
+        id: 'OpenAI Compatible',
+        displayName: 'OpenAI Compatible',
+        apiStyle: 'openai',
+        hosting: 'hybrid',
+        authMode: 'optional',
+        defaultBaseUrl: 'https://api.example.com/v1',
+        defaultModelId: 'custom-model',
+        modelIdHint: 'Enter model ID',
+        baseUrlDescription: 'Generic OpenAI-compatible endpoint',
+        apiKeyDescription: 'Optional if the endpoint requires bearer authentication',
+    },
+];
+
+export function getProviderMetadata(provider: LLMProvider): LLMProviderMetadata {
+    return PROVIDER_CATALOG.find((entry) => entry.id === provider) || {
+        id: provider,
+        displayName: provider,
+        apiStyle: 'openai',
+        hosting: 'hybrid',
+        authMode: 'optional',
+        defaultBaseUrl: 'https://api.example.com/v1',
+        defaultModelId: 'custom-model',
+        modelIdHint: 'Enter model ID',
+        baseUrlDescription: 'Generic API endpoint for this provider',
+        apiKeyDescription: 'Optional if the endpoint requires bearer authentication',
+    };
+}
 
 export interface ProviderConfig {
     name: LLMProvider;
@@ -19,7 +172,7 @@ export interface ModelConfig {
     name: string;         // Display name
     provider: LLMProvider;
     modelId: string;      // Actual model ID for API calls
-    baseUrl?: string;     // Override provider base URL
+    baseUrl: string;      // Base URL for this model/provider
     apiKey?: string;      // Override provider API key (for custom models)
     contextLength?: number;
     description?: string;
@@ -31,12 +184,11 @@ export interface ModelConfig {
 // ============== Settings ==============
 
 export interface LLMWikiSettings {
-    // Legacy settings (for backward compatibility)
+    // Legacy settings (derived from the selected model for backward compatibility)
     ollamaUrl: string;
     model: string;
     
-    // New provider settings
-    provider: LLMProvider;
+    // Provider settings
     providers: ProviderConfig[];
     models: ModelConfig[];
     currentModelId: string;
@@ -47,6 +199,8 @@ export interface LLMWikiSettings {
     autoIngest: boolean;
     autoLint: boolean;
     lintInterval: number;
+    lastLintTime: number;         // Last completed lint timestamp (ms)
+    lastStaleCheckTime: number;   // Last stale check timestamp (ms) - runs monthly
     // Chat enhancement settings
     maxContextTokens: number;      // Max context token count
     autoSaveChat: boolean;         // Auto save chat
@@ -56,13 +210,12 @@ export interface LLMWikiSettings {
 }
 
 // Default provider configurations
-export const DEFAULT_PROVIDERS: ProviderConfig[] = [
-    { name: 'Ollama', displayName: 'Ollama', baseUrl: 'http://localhost:11434', enabled: true },
-    { name: 'OpenAI', displayName: 'OpenAI', enabled: false },
-    { name: 'Anthropic', displayName: 'Anthropic', enabled: false },
-    { name: 'DeepSeek', displayName: 'DeepSeek', baseUrl: 'https://api.deepseek.com', enabled: false },
-    { name: 'OpenAI Compatible', displayName: 'OpenAI Compatible', enabled: false },
-];
+export const DEFAULT_PROVIDERS: ProviderConfig[] = PROVIDER_CATALOG.map((provider) => ({
+    name: provider.id,
+    displayName: provider.displayName,
+    baseUrl: provider.defaultBaseUrl,
+    enabled: provider.enabledByDefault ?? false,
+}));
 
 // Default model configurations (empty - user must add models)
 export const DEFAULT_MODELS: ModelConfig[] = [];
@@ -72,8 +225,7 @@ export const DEFAULT_SETTINGS: LLMWikiSettings = {
     ollamaUrl: 'http://localhost:11434',
     model: '',
     
-    // New provider settings
-    provider: 'Ollama',
+    // Provider settings
     providers: DEFAULT_PROVIDERS,
     models: DEFAULT_MODELS,
     currentModelId: '',
@@ -84,6 +236,8 @@ export const DEFAULT_SETTINGS: LLMWikiSettings = {
     autoIngest: true,
     autoLint: false,
     lintInterval: 60,
+    lastLintTime: 0,
+    lastStaleCheckTime: 0,
     // Chat enhancement default settings
     maxContextTokens: 8192,
     autoSaveChat: false,
@@ -215,6 +369,7 @@ export interface LintResult {
     issues: LintIssue[];
     fixed: number;
     pending: number;
+    lastLintTime: number;
 }
 
 // ============== Chat Types ==============

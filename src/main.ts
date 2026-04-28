@@ -3,12 +3,11 @@
  * Transforms Obsidian into an AI-driven, self-maintaining knowledge base
  */
 
-import { Plugin, PluginSettingTab, App, Setting, WorkspaceLeaf, TFile, Notice, Modal } from 'obsidian';
-import type { LLMWikiSettings, LLMProvider, ModelConfig, ProviderConfig } from './types';
-import { DEFAULT_SETTINGS, DEFAULT_PROVIDERS } from './types';
-import { getOllamaClient } from './ollama/client';
+import { Plugin, PluginSettingTab, App, Setting, WorkspaceLeaf, TFile, Notice, Modal, normalizePath, EventRef } from 'obsidian';
+import type { LLMWikiSettings, LLMProvider, ModelConfig } from './types';
+import { DEFAULT_SETTINGS, PROVIDER_CATALOG, getProviderMetadata } from './types';
 import { getLLMClient, resetLLMClient } from './llm/client';
-import { ingestFile, ingestContent } from './flows/ingest';
+import { ingestFile, ingestContent, ingestFiles } from './flows/ingest';
 import { queryWiki } from './flows/query';
 import { lintWiki } from './flows/lint';
 import { EnhancedChatView } from './chat/EnhancedChatView';
@@ -21,6 +20,12 @@ const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
  */
 export default class LLMWikiPlugin extends Plugin {
     settings!: LLMWikiSettings;
+    private autoLintTimer: number | null = null;
+    private isLintRunning = false;
+    private autoIngestTimer: number | null = null;
+    private autoIngestEventRef: EventRef | null = null;
+    private autoIngestQueue = new Set<string>();
+    private isIngestRunning = false;
 
     async onload() {
         await this.loadSettings();
@@ -29,7 +34,7 @@ export default class LLMWikiPlugin extends Plugin {
         this.registerView(VIEW_TYPE_CHAT, (leaf) => new EnhancedChatView(leaf, this));
 
         // Add ribbon icon
-        this.addRibbonIcon('bot', 'WikiChat', (evt: MouseEvent) => {
+        this.addRibbonIcon('bot', 'WikiChat', (_evt: MouseEvent) => {
             this.activateView();
         });
 
@@ -89,23 +94,265 @@ export default class LLMWikiPlugin extends Plugin {
         // Create necessary directories
         this.initializeDirectories();
 
-        // Check Ollama connection
-        this.checkOllamaConnection();
+        // Initialize scheduled maintenance
+        this.setupAutoLintSchedule();
+
+        // Initialize source-file auto-ingest trigger
+        this.setupAutoIngestTrigger();
 
         console.log('WikiChat Plugin loaded');
     }
 
     onunload() {
+        if (this.autoLintTimer !== null) {
+            window.clearInterval(this.autoLintTimer);
+            this.autoLintTimer = null;
+        }
+
+        if (this.autoIngestTimer !== null) {
+            window.clearTimeout(this.autoIngestTimer);
+            this.autoIngestTimer = null;
+        }
+
+        if (this.autoIngestEventRef) {
+            this.app.vault.offref(this.autoIngestEventRef);
+            this.autoIngestEventRef = null;
+        }
+
         this.app.workspace.detachLeavesOfType(VIEW_TYPE_CHAT);
         console.log('WikiChat Plugin unloaded');
     }
 
+    setupAutoLintSchedule() {
+        if (this.autoLintTimer !== null) {
+            window.clearInterval(this.autoLintTimer);
+            this.autoLintTimer = null;
+        }
+
+        if (!this.settings.autoLint) {
+            return;
+        }
+
+        const intervalMs = Math.max(1, this.settings.lintInterval) * 60 * 1000;
+        this.autoLintTimer = window.setInterval(() => {
+            void this.runLint('auto');
+        }, intervalMs);
+    }
+
+    setupAutoIngestTrigger() {
+        if (this.autoIngestEventRef) {
+            this.app.vault.offref(this.autoIngestEventRef);
+            this.autoIngestEventRef = null;
+        }
+
+        if (this.autoIngestTimer !== null) {
+            window.clearTimeout(this.autoIngestTimer);
+            this.autoIngestTimer = null;
+        }
+
+        this.autoIngestQueue.clear();
+
+        if (!this.settings.autoIngest) {
+            void this.appendAutoIngestLog('info', 'trigger=disabled');
+            return;
+        }
+
+        void this.appendAutoIngestLog(
+            'info',
+            `trigger=enabled sourcesPath=${normalizePath(this.settings.sourcesPath)}`
+        );
+
+        this.autoIngestEventRef = this.app.vault.on('create', (file) => {
+            if (!(file instanceof TFile)) {
+                return;
+            }
+
+            if (!this.shouldAutoIngest(file)) {
+                return;
+            }
+
+            void this.appendAutoIngestLog('info', `event=create file=${file.path}`);
+            this.enqueueAutoIngest(file.path);
+        });
+    }
+
+    private shouldAutoIngest(file: TFile): boolean {
+        const sourcesRoot = normalizePath(this.settings.sourcesPath);
+        const sourcePrefix = `${sourcesRoot}/`;
+
+        if (!(file.path === sourcesRoot || file.path.startsWith(sourcePrefix))) {
+            return false;
+        }
+
+        const extension = file.extension.toLowerCase();
+        return extension === 'md' || extension === 'txt';
+    }
+
+    private enqueueAutoIngest(filePath: string) {
+        this.autoIngestQueue.add(filePath);
+        void this.appendAutoIngestLog('info', `queue-add file=${filePath} queueSize=${this.autoIngestQueue.size}`);
+        this.scheduleAutoIngestFlush();
+    }
+
+    private scheduleAutoIngestFlush(delayMs: number = 3000) {
+        if (this.autoIngestTimer !== null) {
+            window.clearTimeout(this.autoIngestTimer);
+        }
+
+        void this.appendAutoIngestLog('info', `flush-scheduled delayMs=${delayMs} queueSize=${this.autoIngestQueue.size}`);
+
+        this.autoIngestTimer = window.setTimeout(() => {
+            this.autoIngestTimer = null;
+            void this.flushAutoIngestQueue();
+        }, delayMs);
+    }
+
+    private async flushAutoIngestQueue() {
+        if (this.isIngestRunning) {
+            await this.appendAutoIngestLog('skipped', 'reason=ingest-running');
+            this.scheduleAutoIngestFlush(2000);
+            return;
+        }
+
+        const filePaths = Array.from(this.autoIngestQueue);
+        if (filePaths.length === 0) {
+            return;
+        }
+
+        this.autoIngestQueue.clear();
+        this.isIngestRunning = true;
+
+        try {
+            new Notice(`Auto-ingest started: ${filePaths.length} file(s)`);
+            await this.appendAutoIngestLog('info', `batch-start count=${filePaths.length} files=${filePaths.join('|')}`);
+
+            const results = await ingestFiles(
+                this.app,
+                this.settings,
+                filePaths,
+                (message) => {
+                    console.log('Auto-ingest:', message);
+                    void this.appendAutoIngestLog('info', `progress ${message}`);
+                }
+            );
+
+            const successCount = results.filter((result) => result.success).length;
+            const failedCount = results.length - successCount;
+            const failedDetails = results
+                .filter((result) => !result.success)
+                .map((result) => `${result.sourcePath}:${result.message}`)
+                .join('|');
+
+            await this.appendAutoIngestLog(
+                failedCount === 0 ? 'ok' : 'error',
+                `batch-end success=${successCount} failed=${failedCount}${failedDetails ? ` failedFiles=${failedDetails}` : ''}`
+            );
+
+            if (failedCount === 0) {
+                new Notice(`Auto-ingest completed: ${successCount} file(s)`);
+            } else {
+                new Notice(`Auto-ingest completed: ${successCount} succeeded, ${failedCount} failed`);
+            }
+        } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            console.error('Auto-ingest failed:', error);
+            await this.appendAutoIngestLog('error', `batch-crash reason=${reason}`);
+            new Notice(`Auto-ingest failed: ${reason}`, 6000);
+        } finally {
+            this.isIngestRunning = false;
+
+            if (this.autoIngestQueue.size > 0) {
+                this.scheduleAutoIngestFlush(1000);
+            }
+        }
+    }
+
+    private async appendAutoIngestLog(
+        status: 'info' | 'ok' | 'error' | 'skipped',
+        details: string
+    ): Promise<void> {
+        const timestamp = new Date().toISOString();
+        const logLine = `[${timestamp}] status=${status} ${details}`;
+        const pluginDir = normalizePath(`.obsidian/plugins/${this.manifest.id}`);
+        const logPath = normalizePath(`${pluginDir}/auto-ingest.log`);
+
+        try {
+            if (!this.app.vault.getAbstractFileByPath(pluginDir)) {
+                await this.app.vault.createFolder(pluginDir);
+            }
+
+            const adapter = this.app.vault.adapter as unknown as {
+                append?: (path: string, data: string) => Promise<void>;
+            };
+
+            if (typeof adapter.append === 'function') {
+                await adapter.append(logPath, `${logLine}\n`);
+                return;
+            }
+
+            const existing = this.app.vault.getAbstractFileByPath(logPath);
+            if (existing instanceof TFile) {
+                const current = await this.app.vault.read(existing);
+                await this.app.vault.modify(existing, `${current}${logLine}\n`);
+            } else {
+                await this.app.vault.create(logPath, `${logLine}\n`);
+            }
+        } catch (error) {
+            console.warn('Failed to write auto-ingest log:', error);
+        }
+    }
+
+    private async appendMaintenanceLog(
+        mode: 'manual' | 'auto',
+        status: 'ok' | 'error' | 'skipped',
+        details: string
+    ): Promise<void> {
+        const timestamp = new Date().toISOString();
+        const logLine = `[${timestamp}] mode=${mode} status=${status} ${details}`;
+        const logDir = normalizePath('.obsidian/wikichat-logs');
+        const logPath = normalizePath(`${logDir}/maintenance.log`);
+
+        try {
+            if (!this.app.vault.getAbstractFileByPath(logDir)) {
+                await this.app.vault.createFolder(logDir);
+            }
+
+            const adapter = this.app.vault.adapter as unknown as {
+                append?: (path: string, data: string) => Promise<void>;
+            };
+
+            if (typeof adapter.append === 'function') {
+                await adapter.append(logPath, `${logLine}\n`);
+                return;
+            }
+
+            const existing = this.app.vault.getAbstractFileByPath(logPath);
+            if (existing instanceof TFile) {
+                const current = await this.app.vault.read(existing);
+                await this.app.vault.modify(existing, `${current}${logLine}\n`);
+            } else {
+                await this.app.vault.create(logPath, `${logLine}\n`);
+            }
+        } catch (error) {
+            console.warn('Failed to write maintenance log:', error);
+        }
+    }
+
     async loadSettings() {
         this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        this.syncLegacyModelFields();
     }
 
     async saveSettings() {
+        this.syncLegacyModelFields();
         await this.saveData(this.settings);
+    }
+
+    private syncLegacyModelFields() {
+        const currentModel = this.settings.models.find((model) => model.id === this.settings.currentModelId);
+
+        this.settings.model = currentModel?.modelId || '';
+        this.settings.ollamaUrl = currentModel?.baseUrl || DEFAULT_SETTINGS.ollamaUrl;
     }
 
     async activateView() {
@@ -147,66 +394,163 @@ export default class LLMWikiPlugin extends Plugin {
         }
     }
 
-    async checkOllamaConnection() {
-        const client = getOllamaClient(this.settings.ollamaUrl, this.settings.model);
-        const isHealthy = await client.healthCheck();
-        
-        if (!isHealthy) {
-            new Notice('⚠️ Cannot connect to Ollama. Please ensure Ollama is running.', 5000);
+    async checkLLMConnection(modelOverride?: ModelConfig) {
+        try {
+            const settings = modelOverride
+                ? this.createHealthCheckSettings(modelOverride)
+                : this.settings;
+            const client = getLLMClient(settings);
+            const isHealthy = await client.healthCheck();
+
+            if (!isHealthy) {
+                new Notice('⚠️ Cannot connect to the configured model provider. Please check your model settings.', 5000);
+                return false;
+            }
+
+            new Notice('✅ Model connection successful', 4000);
+            return true;
+        } catch (error) {
+            console.warn('Configured LLM health check failed:', error);
+            new Notice('⚠️ No valid model is configured for automatic AI tasks.', 5000);
+            return false;
+        } finally {
+            if (modelOverride) {
+                getLLMClient(this.settings);
+            }
         }
     }
 
+    private createHealthCheckSettings(modelOverride: ModelConfig): LLMWikiSettings {
+        const existingIndex = this.settings.models.findIndex((model) => model.id === modelOverride.id);
+        const models = [...this.settings.models];
+
+        if (existingIndex >= 0) {
+            models[existingIndex] = modelOverride;
+        } else {
+            models.push(modelOverride);
+        }
+
+        return {
+            ...this.settings,
+            models,
+            currentModelId: modelOverride.id,
+            model: modelOverride.modelId,
+            ollamaUrl: modelOverride.baseUrl,
+        };
+    }
+
     async ingestCurrentFile() {
+        if (this.isIngestRunning) {
+            new Notice('Ingest is already running');
+            return;
+        }
+
         const activeFile = this.app.workspace.getActiveFile();
         if (!activeFile) {
             new Notice('No file open');
             return;
         }
 
-        new Notice('Starting file ingestion...');
+        this.isIngestRunning = true;
 
-        const result = await ingestFile(this.app, this.settings, activeFile.path, (msg) => {
-            console.log('Ingest:', msg);
-        });
+        try {
+            new Notice('Starting file ingestion...');
 
-        if (result.success) {
-            new Notice(`✅ Ingestion successful: ${result.entities.length} entities`);
-        } else {
-            new Notice(`❌ Ingestion failed: ${result.message}`);
+            const result = await ingestFile(this.app, this.settings, activeFile.path, (msg) => {
+                console.log('Ingest:', msg);
+            });
+
+            if (result.success) {
+                new Notice(`✅ Ingestion successful: ${result.entities.length} entities`);
+            } else {
+                new Notice(`❌ Ingestion failed: ${result.message}`);
+            }
+        } finally {
+            this.isIngestRunning = false;
         }
     }
 
     async ingestClipboard() {
+        if (this.isIngestRunning) {
+            new Notice('Ingest is already running');
+            return;
+        }
+
         const content = await navigator.clipboard.readText();
         if (!content) {
             new Notice('Clipboard is empty');
             return;
         }
 
-        new Notice('Starting content ingestion...');
+        this.isIngestRunning = true;
 
-        const result = await ingestContent(this.app, this.settings, content, undefined, (msg) => {
-            console.log('Ingest:', msg);
-        });
+        try {
+            new Notice('Starting content ingestion...');
 
-        if (result.success) {
-            new Notice(`✅ Ingestion successful: ${result.entities.length} entities`);
-        } else {
-            new Notice(`❌ Ingestion failed: ${result.message}`);
+            const result = await ingestContent(this.app, this.settings, content, undefined, (msg) => {
+                console.log('Ingest:', msg);
+            });
+
+            if (result.success) {
+                new Notice(`✅ Ingestion successful: ${result.entities.length} entities`);
+            } else {
+                new Notice(`❌ Ingestion failed: ${result.message}`);
+            }
+        } finally {
+            this.isIngestRunning = false;
         }
     }
 
-    async runLint() {
-        new Notice('Starting Wiki maintenance check...');
+    async runLint(mode: 'manual' | 'auto' = 'manual') {
+        if (this.isLintRunning) {
+            if (mode === 'manual') {
+                new Notice('Maintenance check is already running');
+            }
+            await this.appendMaintenanceLog(mode, 'skipped', 'reason=already-running');
+            return;
+        }
 
-        const result = await lintWiki(this.app, this.settings, false, (msg) => {
-            console.log('Lint:', msg);
-        });
+        this.isLintRunning = true;
 
-        if (result.issues.length === 0) {
-            new Notice('✅ Wiki is in good condition, no issues found');
-        } else {
-            new Notice(`Found ${result.issues.length} issues, fixed ${result.fixed} of them`);
+        try {
+            if (mode === 'manual') {
+                new Notice('Starting Wiki maintenance check...');
+            }
+
+            const result = await lintWiki(this.app, this.settings, false, (msg) => {
+                console.log('Lint:', msg);
+            });
+
+            this.settings.lastLintTime = result.lastLintTime;
+            
+            // Update stale check time if it's been 30+ days since last check
+            const thirtyDaysInMs = 30 * 24 * 60 * 60 * 1000;
+            const lastStaleCheckTime = this.settings.lastStaleCheckTime ?? 0;
+            if (Date.now() - lastStaleCheckTime >= thirtyDaysInMs) {
+                this.settings.lastStaleCheckTime = Date.now();
+            }
+            
+            await this.saveSettings();
+
+            await this.appendMaintenanceLog(
+                mode,
+                'ok',
+                `issues=${result.issues.length} fixed=${result.fixed} lastLintTime=${result.lastLintTime}`
+            );
+
+            if (result.issues.length === 0) {
+                if (mode === 'manual') {
+                    new Notice('✅ Wiki is in good condition, no issues found');
+                }
+            } else {
+                new Notice(`Found ${result.issues.length} issues, fixed ${result.fixed} of them`);
+            }
+        } catch (error) {
+            console.error('Maintenance check failed:', error);
+            await this.appendMaintenanceLog(mode, 'error', `reason=${String(error)}`);
+            new Notice('❌ Wiki maintenance check failed');
+        } finally {
+            this.isLintRunning = false;
         }
     }
 
@@ -278,6 +622,7 @@ class LLMWikiSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         this.plugin.settings.sourcesPath = value;
                         await this.plugin.saveSettings();
+                        this.plugin.setupAutoIngestTrigger();
                     })
             );
 
@@ -346,6 +691,7 @@ class LLMWikiSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         this.plugin.settings.autoIngest = value;
                         await this.plugin.saveSettings();
+                        this.plugin.setupAutoIngestTrigger();
                     })
             );
 
@@ -358,6 +704,7 @@ class LLMWikiSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         this.plugin.settings.autoLint = value;
                         await this.plugin.saveSettings();
+                        this.plugin.setupAutoLintSchedule();
                     })
             );
 
@@ -372,131 +719,9 @@ class LLMWikiSettingTab extends PluginSettingTab {
                     .onChange(async (value) => {
                         this.plugin.settings.lintInterval = value;
                         await this.plugin.saveSettings();
+                        this.plugin.setupAutoLintSchedule();
                     })
             );
-    }
-
-    private renderProviderSettings(containerEl: HTMLElement): void {
-        const provider = this.plugin.settings.provider;
-        const providerConfig = this.plugin.settings.providers.find(p => p.name === provider);
-
-        if (provider === 'Ollama') {
-            new Setting(containerEl)
-                .setName('Ollama URL')
-                .setDesc('Ollama API address')
-                .addText((text) =>
-                    text
-                        .setPlaceholder('http://localhost:11434')
-                        .setValue(providerConfig?.baseUrl || this.plugin.settings.ollamaUrl)
-                        .onChange(async (value) => {
-                            const config = this.getOrCreateProviderConfig('Ollama');
-                            config.baseUrl = value;
-                            this.plugin.settings.ollamaUrl = value; // Legacy compatibility
-                            await this.plugin.saveSettings();
-                        })
-                );
-        } else if (provider === 'OpenAI') {
-            new Setting(containerEl)
-                .setName('OpenAI API Key')
-                .setDesc('Your OpenAI API key')
-                .addText((text) =>
-                    text
-                        .setPlaceholder('sk-...')
-                        .setValue(providerConfig?.apiKey || '')
-                        .onChange(async (value) => {
-                            const config = this.getOrCreateProviderConfig('OpenAI');
-                            config.apiKey = value;
-                            config.enabled = value.length > 0;
-                            await this.plugin.saveSettings();
-                        })
-                );
-
-            new Setting(containerEl)
-                .setName('OpenAI Base URL')
-                .setDesc('Custom API endpoint (optional)')
-                .addText((text) =>
-                    text
-                        .setPlaceholder('https://api.openai.com/v1')
-                        .setValue(providerConfig?.baseUrl || '')
-                        .onChange(async (value) => {
-                            const config = this.getOrCreateProviderConfig('OpenAI');
-                            config.baseUrl = value;
-                            await this.plugin.saveSettings();
-                        })
-                );
-        } else if (provider === 'Anthropic') {
-            new Setting(containerEl)
-                .setName('Anthropic API Key')
-                .setDesc('Your Anthropic API key')
-                .addText((text) =>
-                    text
-                        .setPlaceholder('sk-ant-...')
-                        .setValue(providerConfig?.apiKey || '')
-                        .onChange(async (value) => {
-                            const config = this.getOrCreateProviderConfig('Anthropic');
-                            config.apiKey = value;
-                            config.enabled = value.length > 0;
-                            await this.plugin.saveSettings();
-                        })
-                );
-        } else if (provider === 'DeepSeek') {
-            new Setting(containerEl)
-                .setName('DeepSeek API Key')
-                .setDesc('Your DeepSeek API key')
-                .addText((text) =>
-                    text
-                        .setPlaceholder('sk-...')
-                        .setValue(providerConfig?.apiKey || '')
-                        .onChange(async (value) => {
-                            const config = this.getOrCreateProviderConfig('DeepSeek');
-                            config.apiKey = value;
-                            config.enabled = value.length > 0;
-                            await this.plugin.saveSettings();
-                        })
-                );
-        } else if (provider === 'OpenAI Compatible') {
-            new Setting(containerEl)
-                .setName('API Key')
-                .setDesc('API key for OpenAI compatible provider')
-                .addText((text) =>
-                    text
-                        .setPlaceholder('Enter API key')
-                        .setValue(providerConfig?.apiKey || '')
-                        .onChange(async (value) => {
-                            const config = this.getOrCreateProviderConfig('OpenAI Compatible');
-                            config.apiKey = value;
-                            config.enabled = value.length > 0;
-                            await this.plugin.saveSettings();
-                        })
-                );
-
-            new Setting(containerEl)
-                .setName('Base URL')
-                .setDesc('API endpoint for OpenAI compatible provider')
-                .addText((text) =>
-                    text
-                        .setPlaceholder('https://api.example.com/v1')
-                        .setValue(providerConfig?.baseUrl || '')
-                        .onChange(async (value) => {
-                            const config = this.getOrCreateProviderConfig('OpenAI Compatible');
-                            config.baseUrl = value;
-                            await this.plugin.saveSettings();
-                        })
-                );
-        }
-    }
-
-    private getOrCreateProviderConfig(provider: LLMProvider): ProviderConfig {
-        let config = this.plugin.settings.providers.find(p => p.name === provider);
-        if (!config) {
-            config = {
-                name: provider,
-                displayName: provider,
-                enabled: provider === 'Ollama',
-            };
-            this.plugin.settings.providers.push(config);
-        }
-        return config;
     }
 
     private renderModelManagement(containerEl: HTMLElement): void {
@@ -559,11 +784,9 @@ class LLMWikiSettingTab extends PluginSettingTab {
                         if (wasCurrentModel) {
                             const fallbackModel = this.plugin.settings.models[0];
                             this.plugin.settings.currentModelId = fallbackModel?.id || '';
-                            this.plugin.settings.model = fallbackModel?.modelId || '';
                         } else if (this.plugin.settings.models.length === 0) {
                             // Keep settings consistent when the last model is removed.
                             this.plugin.settings.currentModelId = '';
-                            this.plugin.settings.model = '';
                         }
 
                         await this.plugin.saveSettings();
@@ -584,15 +807,6 @@ class LLMWikiSettingTab extends PluginSettingTab {
 
     }
 }
-
-// Provider default URLs
-const PROVIDER_DEFAULTS: Record<LLMProvider, { baseUrl: string; modelIdHint: string }> = {
-    'Ollama': { baseUrl: 'http://localhost:11434', modelIdHint: 'e.g., llama3.2, qwen2.5' },
-    'OpenAI': { baseUrl: 'https://api.openai.com/v1', modelIdHint: 'e.g., gpt-4o, gpt-4o-mini' },
-    'Anthropic': { baseUrl: 'https://api.anthropic.com', modelIdHint: 'e.g., claude-3-5-sonnet-latest' },
-    'DeepSeek': { baseUrl: 'https://api.deepseek.com', modelIdHint: 'e.g., deepseek-chat, deepseek-coder' },
-    'OpenAI Compatible': { baseUrl: 'https://api.example.com/v1', modelIdHint: 'Enter model ID' },
-};
 
 /**
  * Model Edit Modal
@@ -644,14 +858,14 @@ class ModelEditModal extends Modal {
             .setName('Provider')
             .setDesc('LLM provider')
             .addDropdown((dropdown) => {
-                dropdown.addOption('Ollama', 'Ollama');
-                dropdown.addOption('OpenAI', 'OpenAI');
-                dropdown.addOption('Anthropic', 'Anthropic');
-                dropdown.addOption('DeepSeek', 'DeepSeek');
-                dropdown.addOption('OpenAI Compatible', 'OpenAI Compatible');
-                dropdown.setValue(this.model?.provider || 'Ollama');
+                for (const provider of PROVIDER_CATALOG) {
+                    dropdown.addOption(provider.id, provider.displayName);
+                }
+
+                const defaultProvider = this.model?.provider || PROVIDER_CATALOG[0]?.id || 'Ollama';
+                dropdown.setValue(defaultProvider);
                 dropdown.onChange((value) => {
-                    this.updateProviderDefaults(value as LLMProvider);
+                    this.updateProviderDefaults(value);
                 });
                 this.providerSelect = dropdown.selectEl;
             });
@@ -665,26 +879,26 @@ class ModelEditModal extends Modal {
                 text.setValue(this.model?.modelId || '');
             });
 
-        // Base URL (optional)
+        // Base URL
         this.baseUrlSetting = new Setting(contentEl)
             .setName('Base URL')
-            .setDesc('Override provider base URL (optional)')
+            .setDesc('Required endpoint URL for this model')
             .addText((text) => {
                 this.baseUrlInput = text.inputEl;
                 text.setValue(this.model?.baseUrl || '');
             });
 
-        // API Key (optional)
+        // API Key
         this.apiKeySetting = new Setting(contentEl)
             .setName('API Key')
-            .setDesc('Override provider API key (optional)')
+            .setDesc('Required for providers that need authentication')
             .addText((text) => {
                 this.apiKeyInput = text.inputEl;
                 text.setValue(this.model?.apiKey || '');
             });
 
-        // Initialize with provider defaults
-        const initialProvider = (this.model?.provider || 'Ollama') as LLMProvider;
+        // Initialize provider-specific field hints
+        const initialProvider = this.model?.provider || PROVIDER_CATALOG[0]?.id || 'Ollama';
         this.updateProviderDefaults(initialProvider, !this.model);
 
         // Context Length (with slider like settings interface)
@@ -739,6 +953,11 @@ class ModelEditModal extends Modal {
         
         buttonContainer.createEl('button', { text: 'Cancel', cls: 'modal-cancel-btn' })
             .onClickEvent(() => this.close());
+
+        buttonContainer.createEl('button', { text: 'Test Connection', cls: 'modal-test-btn' })
+            .onClickEvent(() => {
+                void this.testConnection();
+            });
         
         buttonContainer.createEl('button', { text: 'Save', cls: 'modal-save-btn' })
             .onClickEvent(() => this.saveModel());
@@ -748,45 +967,32 @@ class ModelEditModal extends Modal {
      * Update placeholder and visibility based on provider
      */
     private updateProviderDefaults(provider: LLMProvider, isNewModel: boolean = false): void {
-        const defaults = PROVIDER_DEFAULTS[provider];
+        const metadata = getProviderMetadata(provider);
         
         // Update base URL placeholder
-        this.baseUrlInput.placeholder = defaults.baseUrl;
+        this.baseUrlInput.placeholder = metadata.defaultBaseUrl;
         if (isNewModel && !this.baseUrlInput.value) {
-            this.baseUrlInput.value = '';
+            this.baseUrlInput.value = metadata.defaultBaseUrl;
         }
         
         // Update model ID hint
-        this.modelIdSetting.setDesc(defaults.modelIdHint);
+        this.modelIdSetting.setDesc(metadata.modelIdHint);
+
+        this.baseUrlSetting.setName(metadata.baseUrlLabel || 'Base URL');
+        this.baseUrlSetting.setDesc(metadata.baseUrlDescription || 'Required endpoint URL for this model');
+        this.apiKeySetting.setName(metadata.apiKeyLabel || 'API Key');
+        this.apiKeySetting.setDesc(metadata.apiKeyDescription || 'Required for providers that need authentication');
         
         // Show/hide API key field based on provider
-        // Ollama doesn't need API key, others do
-        const needsApiKey = provider !== 'Ollama';
+        const needsApiKey = metadata.authMode !== 'none';
         this.apiKeySetting.settingEl.style.display = needsApiKey ? 'flex' : 'none';
     }
 
     private async saveModel(): Promise<void> {
-        const name = this.nameInput.value.trim();
-        const provider = this.providerSelect.value as LLMProvider;
-        const modelId = this.modelIdInput.value.trim();
-
-        if (!name || !modelId) {
-            new Notice('Name and Model ID are required');
+        const modelConfig = this.buildModelConfig();
+        if (!modelConfig) {
             return;
         }
-
-        const modelConfig: ModelConfig = {
-            id: this.model?.id || `${provider}-${modelId}-${Date.now()}`,
-            name,
-            provider,
-            modelId,
-            baseUrl: this.baseUrlInput.value.trim() || undefined,
-            apiKey: this.apiKeyInput.value.trim() || undefined,
-            contextLength: this.contextLengthValue,
-            description: this.descriptionInput.value.trim() || undefined,
-            supportsTools: this.supportsTools,
-            isDefault: this.model?.isDefault || false,
-        };
 
         if (this.model) {
             // Update existing model
@@ -808,6 +1014,49 @@ class ModelEditModal extends Modal {
         }));
         this.close();
         this.onSave();
+    }
+
+    private async testConnection(): Promise<void> {
+        const modelConfig = this.buildModelConfig();
+        if (!modelConfig) {
+            return;
+        }
+
+        new Notice('Testing model connection...');
+        await this.plugin.checkLLMConnection(modelConfig);
+    }
+
+    private buildModelConfig(): ModelConfig | null {
+        const name = this.nameInput.value.trim();
+        const provider = this.providerSelect.value;
+        const modelId = this.modelIdInput.value.trim();
+        const baseUrl = this.baseUrlInput.value.trim();
+        const apiKey = this.apiKeyInput.value.trim();
+        const metadata = getProviderMetadata(provider);
+        const requiresApiKey = metadata.authMode === 'required';
+
+        if (!name || !modelId || !baseUrl) {
+            new Notice('Name, Model ID, and Base URL are required');
+            return null;
+        }
+
+        if (requiresApiKey && !apiKey) {
+            new Notice('API Key is required for the selected provider');
+            return null;
+        }
+
+        return {
+            id: this.model?.id || `${provider}-${modelId}-${Date.now()}`,
+            name,
+            provider,
+            modelId,
+            baseUrl,
+            apiKey: apiKey || undefined,
+            contextLength: this.contextLengthValue,
+            description: this.descriptionInput.value.trim() || undefined,
+            supportsTools: this.supportsTools,
+            isDefault: this.model?.isDefault || false,
+        };
     }
 
     onClose(): void {

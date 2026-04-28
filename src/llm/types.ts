@@ -34,6 +34,7 @@ export interface LLMResponse {
 
 export interface LLMProviderInterface {
     readonly name: string;
+    setModel?(model: string): void;
     
     chat(options: LLMChatOptions): Promise<LLMResponse>;
     chatStream(options: LLMStreamOptions): Promise<LLMResponse>;

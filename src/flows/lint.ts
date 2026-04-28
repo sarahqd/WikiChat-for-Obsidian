@@ -5,7 +5,7 @@
 
 import { App, TFile } from 'obsidian';
 import type { LLMWikiSettings, OllamaMessage, ToolContext, LintResult, LintIssue } from '../types';
-import { getOllamaClient } from '../ollama/client';
+import { getLLMClient } from '../llm/client';
 import { executeTool, getOllamaTools } from '../tools';
 
 const SYSTEM_PROMPT = `You are a knowledge base maintenance assistant. Your task is to detect and fix issues in the Wiki.
@@ -46,7 +46,7 @@ export async function lintWiki(
     autoFix: boolean = false,
     onProgress?: (message: string) => void
 ): Promise<LintResult> {
-    const client = getOllamaClient(settings.ollamaUrl, settings.model);
+    const client = getLLMClient(settings);
     const context: ToolContext = {
         vault: app.vault,
         app,
@@ -55,6 +55,8 @@ export async function lintWiki(
 
     const issues: LintIssue[] = [];
     let fixed = 0;
+    const nowTs = Date.now();
+    const lastLintTime = settings.lastLintTime ?? 0;
 
     try {
         // Step 1: Get all Wiki pages
@@ -65,13 +67,23 @@ export async function lintWiki(
                      !file.path.endsWith('log.md')
         );
 
-        // Step 2: Check for broken links
+        const changedFiles = lastLintTime > 0
+            ? wikiFiles.filter((file) => file.stat.mtime > lastLintTime)
+            : wikiFiles;
+
+        onProgress?.(
+            lastLintTime > 0
+                ? `Incremental scan: ${changedFiles.length} changed files (of ${wikiFiles.length} total)`
+                : `Full scan: ${wikiFiles.length} files`
+        );
+
+        // Step 2: Check for broken links in changed files
         onProgress?.('Checking broken links...');
         const pageNames = new Set(
             wikiFiles.map((f) => f.basename)
         );
 
-        for (const file of wikiFiles) {
+        for (const file of changedFiles) {
             const content = await app.vault.read(file);
             const links = content.match(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g) || [];
             
@@ -88,23 +100,32 @@ export async function lintWiki(
             }
         }
 
-        // Step 3: Check for stale pages (not updated in 30 days)
-        onProgress?.('Checking stale pages...');
-        const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-        
-        for (const file of wikiFiles) {
-            if (file.stat.mtime < thirtyDaysAgo) {
-                issues.push({
-                    type: 'stale',
-                    path: file.path,
-                    description: `Page not updated for over 30 days`,
-                    suggestion: `Check if content needs updating`,
-                });
+        // Step 3: Check for stale pages (monthly check - not updated in 30 days)
+        const thirtyDaysInMs = 30 * 24 * 60 * 60 * 1000;
+        const lastStaleCheckTime = settings.lastStaleCheckTime ?? 0;
+        const shouldCheckStale = Date.now() - lastStaleCheckTime >= thirtyDaysInMs;
+
+        if (shouldCheckStale) {
+            onProgress?.('Checking stale pages (monthly check)...');
+            const thirtyDaysAgo = Date.now() - thirtyDaysInMs;
+            
+            for (const file of wikiFiles) {
+                if (file.stat.mtime < thirtyDaysAgo) {
+                    issues.push({
+                        type: 'stale',
+                        path: file.path,
+                        description: `Page not updated for over 30 days`,
+                        suggestion: `Check if content needs updating`,
+                    });
+                }
             }
+        } else {
+            const daysUntilNextCheck = Math.ceil((thirtyDaysInMs - (Date.now() - lastStaleCheckTime)) / (24 * 60 * 60 * 1000));
+            onProgress?.(`Stale check skipped (next check in ${daysUntilNextCheck} days)`);
         }
 
         // Step 4: Use LLM for advanced checks (contradictions, duplicates)
-        if (wikiFiles.length > 0) {
+        if (changedFiles.length > 0) {
             onProgress?.('Running intelligent detection...');
             
             const indexPath = `${settings.wikiPath}/index.md`;
@@ -127,6 +148,9 @@ ${indexContent}
 ## Detected Issues
 ${issues.map((i) => `- [${i.type}] ${i.path}: ${i.description}`).join('\n') || '(None)'}
 
+## Changed Pages Since Last Check
+${changedFiles.map((file) => `- ${file.path}`).join('\n') || '(None)'}
+
 Please check for:
 1. Pages with duplicate content
 2. Contradictory statements
@@ -137,7 +161,7 @@ If issues are found, please use tools to record or fix them.`,
             ];
 
             const tools = getOllamaTools();
-            let response = await client.chat(messages, tools, SYSTEM_PROMPT);
+            let response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
             let iterations = 0;
             const maxIterations = 5;
 
@@ -170,7 +194,7 @@ If issues are found, please use tools to record or fix them.`,
                         });
                     }
 
-                    response = await client.chat(messages, tools, SYSTEM_PROMPT);
+                    response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
                 } else {
                     break;
                 }
@@ -184,7 +208,7 @@ If issues are found, please use tools to record or fix them.`,
                 type: 'lint',
                 operation: 'Wiki maintenance check',
                 status: 'success',
-                message: `Found ${issues.length} issues, fixed ${fixed} of them`,
+                message: `Scanned ${changedFiles.length}/${wikiFiles.length} files, found ${issues.length} issues, fixed ${fixed} of them`,
             },
             context
         );
@@ -193,6 +217,7 @@ If issues are found, please use tools to record or fix them.`,
             issues,
             fixed,
             pending: issues.length - fixed,
+            lastLintTime: nowTs,
         };
     } catch (error) {
         return {
@@ -203,6 +228,7 @@ If issues are found, please use tools to record or fix them.`,
             }],
             fixed: 0,
             pending: 0,
+            lastLintTime: settings.lastLintTime ?? 0,
         };
     }
 }
@@ -216,7 +242,7 @@ export async function fixLintIssue(
     issue: LintIssue,
     onProgress?: (message: string) => void
 ): Promise<boolean> {
-    const client = getOllamaClient(settings.ollamaUrl, settings.model);
+    const client = getLLMClient(settings);
     const context: ToolContext = {
         vault: app.vault,
         app,
@@ -248,7 +274,7 @@ Please use tools to fix this issue.`,
         ];
 
         const tools = getOllamaTools();
-        let response = await client.chat(messages, tools, SYSTEM_PROMPT);
+        let response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
         let iterations = 0;
         const maxIterations = 3;
 
@@ -275,7 +301,7 @@ Please use tools to fix this issue.`,
                     });
                 }
 
-                response = await client.chat(messages, tools, SYSTEM_PROMPT);
+                response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
             } else {
                 break;
             }

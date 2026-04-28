@@ -92,7 +92,7 @@ export class EnhancedChatView extends ItemView {
     constructor(leaf: WorkspaceLeaf, plugin: { settings: LLMWikiSettings; saveSettings: () => Promise<void> }) {
         super(leaf);
         this.plugin = plugin;
-        this.currentModel = plugin.settings.model;
+        this.currentModel = plugin.settings.models.find((model) => model.id === plugin.settings.currentModelId)?.name || '';
     }
 
     getViewType(): string { return VIEW_TYPE_CHAT; }
@@ -945,11 +945,9 @@ export class EnhancedChatView extends ItemView {
             if (currentModelConfig) {
                 this.currentModel = currentModelConfig.name;
                 this.plugin.settings.currentModelId = currentModelConfig.id;
-                this.plugin.settings.model = currentModelConfig.modelId;
             } else {
                 this.currentModel = '';
                 this.plugin.settings.currentModelId = '';
-                this.plugin.settings.model = '';
             }
 
             if (this.modelLabelEl) {
@@ -978,7 +976,6 @@ export class EnhancedChatView extends ItemView {
         
         this.currentModel = model;
         this.plugin.settings.currentModelId = modelConfig.id;
-        this.plugin.settings.model = modelConfig.modelId;
         await this.plugin.saveSettings();
         
         // Update LLM client

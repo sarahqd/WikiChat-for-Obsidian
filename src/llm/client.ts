@@ -7,11 +7,9 @@ import type {
     LLMWikiSettings, 
     LLMProvider, 
     ModelConfig, 
-    ProviderConfig,
-    OllamaMessage, 
-    OllamaTool, 
-    OllamaToolCall 
+    ProviderConfig
 } from '../types';
+import { getProviderMetadata } from '../types';
 import type { LLMProviderInterface, LLMProviderConfig, LLMChatOptions, LLMStreamOptions, LLMResponse } from './types';
 import { OllamaClient } from '../ollama/client';
 import { OpenAIProvider } from './openai';
@@ -29,61 +27,23 @@ export class LLMClient implements LLMProviderInterface {
         this.setCurrentModel(settings.currentModelId);
     }
 
+    private getModelForProvider(provider: LLMProvider): ModelConfig | undefined {
+        return this.settings.models.find((model) => model.provider === provider);
+    }
+
     private initializeProviders(): void {
-        // Initialize Ollama provider
-        const ollamaConfig = this.settings.providers.find(p => p.name === 'Ollama');
-        if (ollamaConfig?.enabled) {
-            const client = new OllamaClient(
-                ollamaConfig.baseUrl || this.settings.ollamaUrl,
-                this.settings.model
-            );
-            this.providers.set('Ollama', this.wrapOllamaClient(client));
-        }
-
-        // Initialize OpenAI provider
-        const openaiConfig = this.settings.providers.find(p => p.name === 'OpenAI');
-        if (openaiConfig?.enabled && openaiConfig.apiKey) {
-            this.providers.set('OpenAI', new OpenAIProvider({
-                apiKey: openaiConfig.apiKey,
-                baseUrl: openaiConfig.baseUrl,
-                model: 'gpt-4o',
-            }));
-        }
-
-        // Initialize Anthropic provider
-        const anthropicConfig = this.settings.providers.find(p => p.name === 'Anthropic');
-        if (anthropicConfig?.enabled && anthropicConfig.apiKey) {
-            this.providers.set('Anthropic', new AnthropicProvider({
-                apiKey: anthropicConfig.apiKey,
-                baseUrl: anthropicConfig.baseUrl,
-                model: 'claude-3-5-sonnet-20241022',
-            }));
-        }
-
-        // Initialize DeepSeek provider (uses OpenAI-compatible API)
-        const deepseekConfig = this.settings.providers.find(p => p.name === 'DeepSeek');
-        if (deepseekConfig?.enabled && deepseekConfig.apiKey) {
-            this.providers.set('DeepSeek', new OpenAIProvider({
-                apiKey: deepseekConfig.apiKey,
-                baseUrl: deepseekConfig.baseUrl || 'https://api.deepseek.com/v1',
-                model: 'deepseek-chat',
-            }));
-        }
-
-        // Initialize OpenAI Compatible provider
-        const customConfig = this.settings.providers.find(p => p.name === 'OpenAI Compatible');
-        if (customConfig?.enabled && customConfig.apiKey && customConfig.baseUrl) {
-            this.providers.set('OpenAI Compatible', new OpenAIProvider({
-                apiKey: customConfig.apiKey,
-                baseUrl: customConfig.baseUrl,
-                model: 'default',
-            }));
+        for (const config of this.settings.providers) {
+            const model = this.getModelForProvider(config.name);
+            this.initializeProviderFromConfig(config, model);
         }
     }
 
-    private wrapOllamaClient(client: OllamaClient): LLMProviderInterface {
+    private wrapOllamaClient(providerName: LLMProvider, client: OllamaClient): LLMProviderInterface {
         return {
-            name: 'Ollama',
+            name: providerName,
+            setModel: (model: string) => {
+                client.setModel(model);
+            },
             chat: async (options: LLMChatOptions): Promise<LLMResponse> => {
                 const message = await client.chat(
                     options.messages,
@@ -143,16 +103,12 @@ export class LLMClient implements LLMProviderInterface {
     }
 
     private getProviderForModel(model: ModelConfig): LLMProviderInterface {
-        let provider = this.getProvider(model.provider);
-        
-        if (!provider) {
-            // Try to initialize the provider if it exists in settings
-            const config = this.settings.providers.find(p => p.name === model.provider);
-            if (config) {
-                this.initializeProviderFromConfig(config, model);
-                provider = this.getProvider(model.provider);
-            }
+        const config = this.settings.providers.find(p => p.name === model.provider);
+        if (config) {
+            this.initializeProviderFromConfig(config, model);
         }
+
+        const provider = this.getProvider(model.provider);
 
         if (!provider) {
             throw new Error(`Provider ${model.provider} is not available or not configured`);
@@ -161,46 +117,57 @@ export class LLMClient implements LLMProviderInterface {
         return provider;
     }
 
-    private initializeProviderFromConfig(config: ProviderConfig, model?: ModelConfig): void {
-        // Get API key and base URL from model config (if provided) or fall back to provider config
-        const apiKey = model?.apiKey || config.apiKey;
-        const baseUrl = model?.baseUrl || config.baseUrl;
-        
-        // Check if provider is enabled OR if model provides its own complete configuration
-        // This allows models to work even if the provider is not globally enabled
-        const canInitialize = config.enabled || (model?.apiKey && model?.baseUrl);
-        
-        if (config.name === 'Ollama' && canInitialize) {
-            const client = new OllamaClient(
-                baseUrl || this.settings.ollamaUrl,
-                model?.modelId || this.settings.model
-            );
-            this.providers.set('Ollama', this.wrapOllamaClient(client));
-        } else if (config.name === 'OpenAI' && canInitialize && apiKey) {
-            this.providers.set('OpenAI', new OpenAIProvider({
-                apiKey: apiKey,
-                baseUrl: baseUrl,
-                model: model?.modelId || 'gpt-4o',
-            }));
-        } else if (config.name === 'Anthropic' && canInitialize && apiKey) {
-            this.providers.set('Anthropic', new AnthropicProvider({
-                apiKey: apiKey,
-                baseUrl: baseUrl,
-                model: model?.modelId || 'claude-3-5-sonnet-20241022',
-            }));
-        } else if (config.name === 'DeepSeek' && canInitialize && apiKey) {
-            this.providers.set('DeepSeek', new OpenAIProvider({
-                apiKey: apiKey,
-                baseUrl: baseUrl || 'https://api.deepseek.com/v1',
-                model: model?.modelId || 'deepseek-chat',
-            }));
-        } else if (config.name === 'OpenAI Compatible' && canInitialize && apiKey && baseUrl) {
-            this.providers.set('OpenAI Compatible', new OpenAIProvider({
-                apiKey: apiKey,
-                baseUrl: baseUrl,
-                model: model?.modelId || 'default',
-            }));
+    private buildRuntimeConfig(config: ProviderConfig, model?: ModelConfig): LLMProviderConfig {
+        const metadata = getProviderMetadata(config.name);
+
+        return {
+            apiKey: model?.apiKey || config.apiKey,
+            baseUrl: model?.baseUrl || config.baseUrl || metadata.defaultBaseUrl,
+            model: model?.modelId || metadata.defaultModelId,
+            defaultModel: metadata.defaultModelId,
+        };
+    }
+
+    private canInitializeProvider(config: ProviderConfig, model: ModelConfig | undefined, runtimeConfig: LLMProviderConfig): boolean {
+        const metadata = getProviderMetadata(config.name);
+        const hasBaseUrl = Boolean(runtimeConfig.baseUrl);
+        const hasApiKey = Boolean(runtimeConfig.apiKey);
+        const modelHasConfig = Boolean(model?.baseUrl);
+
+        if (!hasBaseUrl) {
+            return false;
         }
+
+        if (metadata.authMode === 'required' && !hasApiKey) {
+            return false;
+        }
+
+        return config.enabled || modelHasConfig;
+    }
+
+    private createProviderInstance(providerName: LLMProvider, runtimeConfig: LLMProviderConfig): LLMProviderInterface {
+        const metadata = getProviderMetadata(providerName);
+
+        switch (metadata.apiStyle) {
+            case 'ollama': {
+                const client = new OllamaClient(runtimeConfig.baseUrl || metadata.defaultBaseUrl, runtimeConfig.model || metadata.defaultModelId);
+                return this.wrapOllamaClient(providerName, client);
+            }
+            case 'anthropic':
+                return new AnthropicProvider(runtimeConfig);
+            case 'openai':
+            default:
+                return new OpenAIProvider(runtimeConfig);
+        }
+    }
+
+    private initializeProviderFromConfig(config: ProviderConfig, model?: ModelConfig): void {
+        const runtimeConfig = this.buildRuntimeConfig(config, model);
+        if (!this.canInitializeProvider(config, model, runtimeConfig)) {
+            return;
+        }
+
+        this.providers.set(config.name, this.createProviderInstance(config.name, runtimeConfig));
     }
 
     async chat(options: LLMChatOptions): Promise<LLMResponse> {
@@ -210,10 +177,8 @@ export class LLMClient implements LLMProviderInterface {
 
         const provider = this.getProviderForModel(this.currentModel);
         
-        // Update model on provider if it has setModel method
-        const providerAny = provider as any;
-        if (providerAny.setModel) {
-            providerAny.setModel(this.currentModel.modelId);
+        if (provider.setModel) {
+            provider.setModel(this.currentModel.modelId);
         }
 
         return provider.chat(options);
@@ -226,10 +191,8 @@ export class LLMClient implements LLMProviderInterface {
 
         const provider = this.getProviderForModel(this.currentModel);
         
-        // Update model on provider if it has setModel method
-        const providerAny = provider as any;
-        if (providerAny.setModel) {
-            providerAny.setModel(this.currentModel.modelId);
+        if (provider.setModel) {
+            provider.setModel(this.currentModel.modelId);
         }
 
         return provider.chatStream(options);
@@ -279,7 +242,7 @@ export class LLMClient implements LLMProviderInterface {
     }
 
     getAvailableProviders(): LLMProvider[] {
-        return Array.from(this.providers.keys()) as LLMProvider[];
+        return Array.from(this.providers.keys());
     }
 
     getEnabledProviders(): ProviderConfig[] {

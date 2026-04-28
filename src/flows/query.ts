@@ -5,7 +5,7 @@
 
 import { App, TFile } from 'obsidian';
 import type { LLMWikiSettings, OllamaMessage, ToolContext, QueryResult } from '../types';
-import { getOllamaClient } from '../ollama/client';
+import { getLLMClient } from '../llm/client';
 import { executeTool, getOllamaTools } from '../tools';
 import { buildRegexFilteredIndex } from './indexContext';
 
@@ -69,7 +69,7 @@ export async function queryWiki(
     question: string,
     onChunk?: (text: string) => void
 ): Promise<QueryResult> {
-    const client = getOllamaClient(settings.ollamaUrl, settings.model);
+    const client = getLLMClient(settings);
     const context: ToolContext = {
         vault: app.vault,
         app,
@@ -108,7 +108,7 @@ The index excerpt above was filtered from index.md using regex matches derived f
 
         // Run agentic loop
         const tools = getOllamaTools();
-        let response = await client.chat(messages, tools, SYSTEM_PROMPT);
+        let response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
         let iterations = 0;
         const maxIterations = 5;
         const sources: string[] = [];
@@ -149,7 +149,7 @@ The index excerpt above was filtered from index.md using regex matches derived f
                     });
                 }
 
-                response = await client.chat(messages, tools, SYSTEM_PROMPT);
+                response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
             } else {
                 break;
             }
@@ -190,7 +190,7 @@ export async function chatWiki(
     onChunk: (text: string) => void,
     contextPrompt?: string
 ): Promise<string> {
-    const client = getOllamaClient(settings.ollamaUrl, settings.model);
+    const client = getLLMClient(settings);
     const context: ToolContext = {
         vault: app.vault,
         app,
@@ -200,7 +200,12 @@ export async function chatWiki(
     try {
         const tools = getOllamaTools();
         const systemPrompt = contextPrompt ? `${contextPrompt}\n\n${SYSTEM_PROMPT}` : SYSTEM_PROMPT;
-        let response = await client.chatStream(messages, onChunk, tools, systemPrompt);
+        let response = (await client.chatStream({
+            messages,
+            onChunk,
+            tools,
+            systemPrompt,
+        })).message;
         let iterations = 0;
         const maxIterations = 5;
 
@@ -227,7 +232,12 @@ export async function chatWiki(
                     });
                 }
 
-                response = await client.chatStream(messages, onChunk, tools, SYSTEM_PROMPT);
+                response = (await client.chatStream({
+                    messages,
+                    onChunk,
+                    tools,
+                    systemPrompt,
+                })).message;
             } else {
                 break;
             }
