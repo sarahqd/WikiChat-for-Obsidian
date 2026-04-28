@@ -7,6 +7,7 @@ import { App, TFile } from 'obsidian';
 import type { LLMWikiSettings, OllamaMessage, ToolContext, QueryResult } from '../types';
 import { getOllamaClient } from '../ollama/client';
 import { executeTool, getOllamaTools } from '../tools';
+import { buildRegexFilteredIndex } from './indexContext';
 
 const SYSTEM_PROMPT = `You are a knowledge base query assistant. Your task is to answer user questions based STRICTLY on the Wiki knowledge base content.
 
@@ -85,6 +86,8 @@ export async function queryWiki(
             indexContent = await app.vault.read(indexFile);
         }
 
+        const filteredIndexContent = buildRegexFilteredIndex(indexContent, question);
+
         // Build initial message
         const messages: OllamaMessage[] = [
             {
@@ -94,12 +97,12 @@ export async function queryWiki(
 ## Question
 ${question}
 
-## Wiki Index
+## Regex-Matched Wiki Index Blocks
 \`\`\`
-${indexContent || '(Wiki is empty)'}
+${filteredIndexContent}
 \`\`\`
 
-Please first locate relevant pages, then read the content to answer the question.`,
+The index excerpt above was filtered from index.md using regex matches derived from the question. If it is insufficient, read index.md or other Wiki pages with tools before answering.`,
             },
         ];
 

@@ -15,6 +15,7 @@ import { ContextManager, getAvailableContextSources } from '../context/ContextMa
 import { ChatHistoryManager, ChatSaver } from '../history/ChatHistoryManager';
 import { getLLMClient } from '../llm/client';
 import { getOllamaTools, executeTool } from '../tools/index';
+import { buildRegexFilteredIndex } from '../flows/indexContext';
 import { 
     FileSelector, 
     SnippetSelector, 
@@ -1154,6 +1155,8 @@ export class EnhancedChatView extends ItemView {
         this.addMessage('user', messageText, this.contexts.length > 0 ? [...this.contexts] : undefined);
 
         try {
+            const relevantIndexContext = await this.getRelevantIndexContext(messageText);
+
             // Build system prompt (including tool descriptions)
             let systemPrompt = `You are the WikiChat assistant, an AI assistant specialized in maintaining and managing knowledge bases. You can help users ingest knowledge, answer queries, and maintain the knowledge base.
 
@@ -1191,6 +1194,10 @@ Examples:
 - "Rewrite only the Content section, keep summary and metadata unchanged" -> Update_Content
 
 When you need to use tools, please call the corresponding tool functions.`;
+
+            if (relevantIndexContext) {
+                systemPrompt += `\n\n## Regex-Matched Index Blocks\n\n\`\`\`\n${relevantIndexContext}\n\`\`\`\n\nThese blocks were filtered from ${this.plugin.settings.wikiPath}/index.md using regex matches derived from the latest user message. Use them as the first retrieval hint, and read index.md or specific pages with tools when more detail is needed.`;
+            }
             
             // If there's context, add to system prompt
             if (this.contexts.length > 0 && this.contextManager) {
@@ -1605,6 +1612,18 @@ When you need to use tools, please call the corresponding tool functions.`;
             const displayName = rawDisplay?.trim() || this.getWikiLinkDisplayName(originalTarget);
             return createInternalLink(resolvedTarget, displayName);
         });
+    }
+
+    private async getRelevantIndexContext(question: string): Promise<string | null> {
+        const indexPath = `${this.plugin.settings.wikiPath}/index.md`;
+        const indexFile = this.app.vault.getAbstractFileByPath(indexPath);
+
+        if (!(indexFile instanceof TFile)) {
+            return null;
+        }
+
+        const indexContent = await this.app.vault.read(indexFile);
+        return buildRegexFilteredIndex(indexContent, question);
     }
 
     /**

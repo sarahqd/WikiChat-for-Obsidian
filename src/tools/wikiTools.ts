@@ -17,6 +17,53 @@ function pathToWikilink(path: string): string {
     return `[[${pathWithoutMd}|${basename}]]`;
 }
 
+function toWikiFileNameStem(value: string): string {
+    return value.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
+}
+
+function normalizeRelatedLink(link: string, wikiPath: string): string {
+    const trimmed = link.trim();
+    if (!trimmed) {
+        return trimmed;
+    }
+
+    const wikilinkMatch = trimmed.match(/^\[\[([^|\]]+)(?:\|([^\]]+))?\]\]$/);
+    if (wikilinkMatch) {
+        const rawTarget = normalizePath(wikilinkMatch[1].trim()).replace(/\.md$/, '');
+        const rawAlias = wikilinkMatch[2]?.trim();
+        const normalizedTarget = rawTarget.includes('/')
+            ? rawTarget
+            : normalizePath(`${wikiPath}/${toWikiFileNameStem(rawTarget)}`);
+        const alias = rawAlias || rawTarget;
+        return `[[${normalizedTarget}|${alias}]]`;
+    }
+
+    const normalizedTarget = normalizePath(`${wikiPath}/${toWikiFileNameStem(trimmed)}`);
+    return `[[${normalizedTarget}|${trimmed}]]`;
+}
+
+function normalizeRelatedLinks(related: string[], wikiPath: string): string[] {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+
+    for (const link of related) {
+        const normalizedLink = normalizeRelatedLink(link, wikiPath);
+        if (!normalizedLink || seen.has(normalizedLink)) {
+            continue;
+        }
+
+        seen.add(normalizedLink);
+        normalized.push(normalizedLink);
+    }
+
+    return normalized;
+}
+
+function pathToWikilinkWithAlias(path: string, alias: string): string {
+    const pathWithoutMd = normalizePath(path).replace(/\.md$/, '');
+    return `[[${pathWithoutMd}|${alias}]]`;
+}
+
 /**
  * Generate YAML frontmatter for a Wiki page
  */
@@ -273,11 +320,11 @@ export const createWikiPageTool: ToolDefinition = {
         const sourcePath = params.source_path as string | undefined;
 
         const now = new Date().toISOString().split('T')[0];
-        const fileName = title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
+        const fileName = toWikiFileNameStem(title);
         const path = normalizePath(`${settings.wikiPath}/${fileName}.md`);
 
         // Build related array: include source_path if provided
-        const related: string[] = [...relatedInput];
+        const related: string[] = normalizeRelatedLinks(relatedInput, settings.wikiPath);
         if (sourcePath) {
             const normalizedSourcePath = normalizePath(sourcePath);
             const sourceFile = vault.getAbstractFileByPath(normalizedSourcePath);
@@ -313,14 +360,33 @@ ${summary ? `## Summary\n\n${summary}\n\n` : ''}## Content\n\n${content}
                 await vault.createFolder(settings.wikiPath);
             }
 
-            // Check if file already exists
+            // Upsert behavior: if page exists, update it; otherwise create it.
             const existingFile = vault.getAbstractFileByPath(path);
             if (existingFile instanceof TFile) {
-                return { success: false, error: `Wiki page already exists: ${path}` };
+                const existingContent = await vault.read(existingFile);
+                const { frontmatter: existingFrontmatter } = parseFrontmatter(existingContent);
+
+                const mergedFrontmatter: WikiPageFrontmatter = {
+                    title,
+                    created: existingFrontmatter?.created || now,
+                    updated: now,
+                    tags: tags.length > 0 ? tags : (existingFrontmatter?.tags || []),
+                    related: related.length > 0 ? related : (existingFrontmatter?.related || []),
+                };
+
+                const updatedContent = `${generateFrontmatter(mergedFrontmatter)}
+
+# ${title}
+
+${summary ? `## Summary\n\n${summary}\n\n` : ''}## Content\n\n${content}
+`;
+
+                await vault.modify(existingFile, updatedContent);
+                return { success: true, data: { path, title, action: 'updated' } };
             }
 
             await vault.create(path, fullContent);
-            return { success: true, data: { path, title } };
+            return { success: true, data: { path, title, action: 'created' } };
         } catch (error) {
             return { success: false, error: String(error) };
         }
@@ -389,7 +455,8 @@ export const updateWikiPageTool: ToolDefinition = {
             }
 
             if (params.related) {
-                frontmatter.related = (params.related as string).split(',').map(r => r.trim()).filter(Boolean);
+                const inputRelated = (params.related as string).split(',').map(r => r.trim()).filter(Boolean);
+                frontmatter.related = normalizeRelatedLinks(inputRelated, context.settings.wikiPath);
             }
 
             let newBody = body;
@@ -615,7 +682,12 @@ export const updatePropertyTool: ToolDefinition = {
                 return { success: false, error: page.error };
             }
 
-            page.frontmatter[property] = parsePropertyValue(property, params.value) as never;
+            if (property === 'related') {
+                const value = parsePropertyValue(property, params.value) as string[];
+                page.frontmatter[property] = normalizeRelatedLinks(value, context.settings.wikiPath) as never;
+            } else {
+                page.frontmatter[property] = parsePropertyValue(property, params.value) as never;
+            }
             if (property !== 'updated') {
                 touchUpdated(page.frontmatter);
             }
@@ -812,9 +884,9 @@ export const addBacklinkTool: ToolDefinition = {
             }
 
             // Add to related if not already present
-            // Use [[path|basename]] format for related links (remove .md from path)
+            // Use [[path|frontmatter.title]] format for related links (remove .md from path)
             const linkPath = targetPath.replace(/\.md$/, '');
-            const targetLink = `[[${linkPath}|${targetFile.basename}]]`;
+            const targetLink = `[[${linkPath}|${targetTitle}]]`;
             if (!sourceFm.related.some(r => r.includes(linkPath))) {
                 sourceFm.related.push(targetLink);
             }
@@ -925,7 +997,8 @@ export const updateIndexTool: ToolDefinition = {
                     const dateStr = page.updated || page.created;
                     const dateDisplay = dateStr ? ` _(${dateStr})_` : '';
                     const tagStr = page.tags.length > 0 ? ` **[${page.tags.join(', ')}]**` : '';
-                    indexContent += `- [[${page.title}]]${dateDisplay}${tagStr}\n`;
+                    const pageLink = pathToWikilinkWithAlias(page.path, page.title);
+                    indexContent += `- ${pageLink}${dateDisplay}${tagStr}\n`;
                 }
                 indexContent += '\n';
             }
@@ -935,7 +1008,8 @@ export const updateIndexTool: ToolDefinition = {
                 indexContent += `### Undated\n\n`;
                 for (const page of noDate) {
                     const tagStr = page.tags.length > 0 ? ` **[${page.tags.join(', ')}]**` : '';
-                    indexContent += `- [[${page.title}]]${tagStr}\n`;
+                    const pageLink = pathToWikilinkWithAlias(page.path, page.title);
+                    indexContent += `- ${pageLink}${tagStr}\n`;
                 }
                 indexContent += '\n';
             }
