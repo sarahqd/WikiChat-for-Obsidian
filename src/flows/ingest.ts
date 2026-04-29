@@ -68,7 +68,8 @@ Tool selection rules:
 Please call these tools as needed to complete the task.`;
 
 async function readWikiIndex(app: App, settings: LLMWikiSettings): Promise<string> {
-    const indexPath = `${settings.wikiPath}/index.md`;
+    const idxDir = settings.indexPath || 'WikiIndex';
+    const indexPath = `${idxDir}/index.md`;
     const indexFile = app.vault.getAbstractFileByPath(indexPath);
     if (indexFile instanceof TFile) {
         return app.vault.read(indexFile);

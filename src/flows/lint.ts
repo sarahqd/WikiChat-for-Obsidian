@@ -128,7 +128,8 @@ export async function lintWiki(
         if (changedFiles.length > 0) {
             onProgress?.('Running intelligent detection...');
             
-            const indexPath = `${settings.wikiPath}/index.md`;
+            const idxDir = settings.indexPath || 'WikiIndex';
+            const indexPath = `${idxDir}/index.md`;
             const indexFile = app.vault.getAbstractFileByPath(indexPath);
             let indexContent = '';
             if (indexFile instanceof TFile) {
