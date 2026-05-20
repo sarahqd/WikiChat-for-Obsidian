@@ -17,6 +17,7 @@ import { getLLMClient } from '../llm/client';
 import { getOllamaTools, executeTool } from '../tools/index';
 import { WikiSearchEngine } from '../search/WikiSearchEngine';
 import { getRelevantIndexContext, buildEmbedFn } from '../flows/query';
+import { getSearchFilesDisplayQuery } from './toolDisplay';
 import { 
     FileSelector, 
     SnippetSelector, 
@@ -2268,7 +2269,7 @@ When you need to use tools, please call the corresponding tool functions.`;
             'append_file': (a) => `✏️ Append to: ${getShortPath(a.path)}`,
             'delete_file': (a) => `🗑️ Delete file: ${getShortPath(a.path)}`,
             'list_files': (a) => `📁 List files: ${getShortPath(a.path) || 'vault root'}`,
-            'search_files': (a) => `🔍 Search: "${a.pattern}"`,
+            'search_files': (a) => `🔍 Search: "${getSearchFilesDisplayQuery(a)}"`,
             'create_directory': (a) => `📁 Create dir: ${getShortPath(a.path)}`,
             'create_wiki_page': (a) => `📝 Create wiki: ${getShortPath(a.path)}`,
             'update_wiki_page': (a) => `✏️ Update wiki: ${getShortPath(a.path)}`,

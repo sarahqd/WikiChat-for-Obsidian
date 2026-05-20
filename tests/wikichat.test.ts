@@ -6,6 +6,7 @@ import { listFilesTool } from '../src/tools/fileTools';
 import { updateContentTool, updatePropertyTool, updateSummaryTool, updateWikiPageTool } from '../src/tools/wikiTools';
 import { DEFAULT_SETTINGS } from '../src/types';
 import { SYSTEM_PROMPT as INGEST_SYSTEM_PROMPT } from '../src/flows/ingest';
+import { getSearchFilesDisplayQuery } from '../src/chat/toolDisplay';
 
 type MockFile = TFile & {
     cache?: {
@@ -118,6 +119,12 @@ test('searchWithFallback uses cached metadata substring fallback after BM25 and 
 
     assert.equal(results.length, 1);
     assert.equal(results[0].title, 'Machine Learning');
+});
+
+test('search_files display uses query argument instead of showing undefined', () => {
+    assert.equal(getSearchFilesDisplayQuery({ query: 'frontmatter summary keyword' }), 'frontmatter summary keyword');
+    assert.equal(getSearchFilesDisplayQuery({ pattern: 'legacy keyword' }), 'legacy keyword');
+    assert.equal(getSearchFilesDisplayQuery({}), '');
 });
 
 test('rebuildInBatches indexes 10000 cached wiki pages without reading file bodies', async () => {
